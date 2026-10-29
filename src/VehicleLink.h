@@ -302,6 +302,7 @@ private:
     int m_selectedPlanItem = -1;
     bool m_planRtl = false;
     bool m_uploadingPlan = false;
+    int m_planGeometryVersion = 2;
     QMap<int,QList<int>> m_pointSequences;
     QMap<int,QList<mavlink_mission_item_int_t>> m_flightMissions;
     QVariantList missionPaths(const QMap<int,QList<mavlink_mission_item_int_t>> &missions, bool planning) const;

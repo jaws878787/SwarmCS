@@ -166,9 +166,10 @@ void VehicleLink::removePlanItem(int row) {
 }
 
 void VehicleLink::rebuildPlan() {
+    m_planGeometryVersion=2;
     m_plannedMissions.clear(); m_pointSequences.clear(); m_planValid=false;
     if (m_planVehicles.isEmpty()) { emit planChanged(); return; }
-    // One local metric frame keeps all formation translations parallel, including across the date line.
+    // Build route-relative lanes in one local metric frame, including across the date line.
     const QGeoCoordinate origin(m_planVehicles.first().latitude,m_planVehicles.first().longitude);
     Vec centroid;
     QList<Vec> offsets;
@@ -182,31 +183,64 @@ void VehicleLink::rebuildPlan() {
     }
     for (auto &p:offsets) { p.x-=centroid.x; p.y-=centroid.y; }
     QString error;
-    double closestPair=std::numeric_limits<double>::infinity();
     for (int a=0;a<offsets.size();++a) for (int b=a+1;b<offsets.size();++b) {
         const double distance=std::hypot(offsets[a].x-offsets[b].x,offsets[a].y-offsets[b].y);
-        closestPair=std::min(closestPair,distance);
         if (distance<m_minimumSeparation+0.1)
             error="Starting/landing formation is closer than minimum separation. Move vehicles apart or reduce separation.";
     }
-    const double compactScale=closestPair>0 ? std::min(1.0,(m_minimumSeparation+1)/closestPair) : 1;
+    QList<Vec> centers,normals,laneBasis;
+    for (const auto &point:m_planPoints) centers.append(local(origin,QGeoCoordinate(point.latitude,point.longitude)));
+    for (int p=1;p<centers.size();++p) {
+        const auto d=centers[p]-centers[p-1]; const double length=std::hypot(d.x,d.y);
+        if (length<0.5) { if (offsets.size()>1) error="Separate adjacent center waypoints by at least 0.5 m."; normals.append({0,1,0}); }
+        else normals.append({-d.y/length,d.x/length,0});
+    }
+    for (int p=0;p<centers.size();++p) {
+        if (normals.isEmpty()) laneBasis.append({0,1,0});
+        else if (p==0) laneBasis.append(normals.first());
+        else if (p==centers.size()-1) laneBasis.append(normals.last());
+        else {
+            const auto a=normals[p-1],b=normals[p];
+            const double denominator=1+a.x*b.x+a.y*b.y;
+            if (denominator<0.125) {
+                if (offsets.size()>1) error="Turn too sharp for separate horizontal lanes. Move the neighboring waypoints.";
+                laneBasis.append(a);
+            } else laneBasis.append({(a.x+b.x)/denominator,(a.y+b.y)/denominator,0});
+        }
+    }
+    // A miter at each corner intersects the two offset leg lines. Every vehicle
+    // therefore has a distinct cross-track coordinate along the entire leg,
+    // even when the original takeoff formation is aligned with that leg.
+    QList<int> order; for (int n=0;n<offsets.size();++n) order.append(n);
+    std::stable_sort(order.begin(),order.end(),[&](int a,int b) { return dot(offsets[a],laneBasis.first())<dot(offsets[b],laneBasis.first()); });
+    QList<double> laneSlots(offsets.size(),0);
+    const double laneSpacing=m_minimumSeparation+3; // Reserve room for coordinate quantization and tracking.
+    for (int rank=0;rank<order.size();++rank) laneSlots[order[rank]]=(rank-(order.size()-1)/2.0)*laneSpacing;
     QList<QList<Vec>> stages;
     QList<double> stageSpeeds;
-    auto formation=[&](int pointIndex,bool layered) {
+    QList<int> stagePointEnds;
+    auto formation=[&](int pointIndex,bool layered,bool original=false) {
         const auto &point=m_planPoints[pointIndex];
-        const double scale=pointIndex>0 && pointIndex<m_planPoints.size()-1 ? compactScale : 1;
-        const auto center=local(origin,QGeoCoordinate(point.latitude,point.longitude));
+        const auto center=centers[pointIndex];
         QList<Vec> nodes;
-        for (int n=0;n<offsets.size();++n) nodes.append({center.x+offsets[n].x*scale,center.y+offsets[n].y*scale,
-            m_planVehicles[n].homeAltitude+point.altitude+(layered ? n*(m_minimumSeparation+1) : 0)});
+        for (int n=0;n<offsets.size();++n) nodes.append({center.x+(original ? offsets[n].x : laneBasis[pointIndex].x*laneSlots[n]),
+            center.y+(original ? offsets[n].y : laneBasis[pointIndex].y*laneSlots[n]),
+            m_planVehicles[n].homeAltitude+point.altitude+(layered ? n*laneSpacing : 0)});
         return nodes;
     };
-    stages.append(formation(0,false)); stageSpeeds.append(5);
+    auto appendStage=[&](int point,bool layered,bool original,double speed,int logical=-1) {
+        stages.append(formation(point,layered,original)); stageSpeeds.append(speed); stagePointEnds.append(logical);
+    };
+    appendStage(0,false,true,5,0);
     for (int p=1;p<m_planPoints.size();++p) {
-        // Separate cruise lanes vertically. Transition at formation slots, then restore takeoff formation at every stop.
-        if (offsets.size()>1) { stages.append(formation(p-1,true)); stageSpeeds.append(m_planPoints[p].speed); }
-        stages.append(formation(p,offsets.size()>1)); stageSpeeds.append(m_planPoints[p].speed);
-        if (offsets.size()>1) { stages.append(formation(p,false)); stageSpeeds.append(m_planPoints[p].speed); }
+        const double speed=m_planPoints[p].speed;
+        if (offsets.size()==1) { appendStage(p,false,false,speed,p); continue; }
+        appendStage(p-1,true,p==1,speed);
+        if (p==1) appendStage(0,true,false,speed); // Enter side-by-side lanes above the takeoff slots.
+        appendStage(p,true,false,speed);
+        const bool last=p==m_planPoints.size()-1;
+        if (last) appendStage(p,true,true,speed); // Recover the original landing formation after cruise.
+        appendStage(p,false,last,speed,p);
     }
     double totalSeconds=0;
     QList<double> durations{0};
@@ -243,7 +277,7 @@ void VehicleLink::rebuildPlan() {
                 error="Nominal synchronization requires a speed below 0.1 m/s. Adjust the waypoint or incoming speed.";
             if (horizontal<0.01 && vertical<0.01) {
                 auto wait=item(MAV_CMD_NAV_DELAY); wait.param1=durations[s]; mission.append(wait);
-                if (offsets.size()>1 && s%3==0) sequences.append(lastNavigation);
+                if (stagePointEnds[s]>0) sequences.append(lastNavigation);
                 continue;
             }
             if (horizontal>0.01) { auto speed=item(MAV_CMD_DO_CHANGE_SPEED); speed.param1=1; speed.param2=std::max(0.1,horizontal/durations[s]); speed.param3=-1; mission.append(speed); }
@@ -253,7 +287,7 @@ void VehicleLink::rebuildPlan() {
             if (origin.distanceTo(coordinate)>25000 || altitude>500 || altitude<0.3) error="Route exceeds the 25 km local planning area or 500 m relative altitude limit.";
             auto waypoint=item(MAV_CMD_NAV_WAYPOINT,coordinate.latitude(),coordinate.longitude(),altitude);
             waypoint.param2=0.5; mission.append(waypoint); lastNavigation=int(mission.size())-1;
-            if (offsets.size()==1 || s%3==0) sequences.append(lastNavigation);
+            if (stagePointEnds[s]>0) sequences.append(lastNavigation);
         }
         m_pointSequences[vehicle.id]=sequences;
         if (m_planRtl) { auto rtl=item(MAV_CMD_NAV_RETURN_TO_LAUNCH); rtl.frame=MAV_FRAME_MISSION; mission.append(rtl); }
@@ -382,7 +416,11 @@ void VehicleLink::finishMissionDownloads() {
         m_loadedPlan=any;
         if (any) {
             if (restorePlanMetadata() || recoverGeneratedPlan()) {
-                m_loadedPlan=false; m_planStatus="Restored center route and downloaded vehicle missions.";
+                m_loadedPlan=false;
+                if (m_planGeometryVersion<2) {
+                    rebuildPlan();
+                    if (m_planValid) m_planStatus="Recalculated horizontal lanes. Upload to apply to vehicles.";
+                } else m_planStatus="Restored center route and downloaded vehicle missions.";
             } else { m_planValid=false; m_planStatus="Imported missions · select a vehicle to view its items."; }
 
         }

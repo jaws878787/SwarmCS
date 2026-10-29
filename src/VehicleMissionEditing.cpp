@@ -92,24 +92,53 @@ QString VehicleLink::missionSignature(int systemId,const QList<mavlink_mission_i
     return QString::fromLatin1(QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex());
 }
 void VehicleLink::savePlanMetadata() {
-    QVariantList points,vehicles; QVariantMap signatures,sequences;
+    QVariantList points,vehicles; QVariantMap signatures,sequences,missions;
     for (const auto &p:m_planPoints) points.append(QVariantMap{{"latitude",p.latitude},{"longitude",p.longitude},{"altitude",p.altitude},{"speed",p.speed}});
     for (const auto &v:m_planVehicles) {
         vehicles.append(QVariantMap{{"id",v.id},{"latitude",v.latitude},{"longitude",v.longitude},{"homeAltitude",v.homeAltitude}});
         signatures[QString::number(v.id)]=missionSignature(v.id,m_plannedMissions.value(v.id));
         QVariantList indexes; for (int seq:m_pointSequences.value(v.id)) indexes.append(seq);
         sequences[QString::number(v.id)]=indexes;
+        QVariantList expected;
+        for (const auto &i:m_plannedMissions.value(v.id)) expected.append(QVariantMap{{"command",int(i.command)},{"frame",int(i.frame)},
+            {"x",i.x},{"y",i.y},{"z",double(i.z)},{"p1",double(i.param1)},{"p2",double(i.param2)},{"p3",double(i.param3)},{"p4",double(i.param4)}});
+        missions[QString::number(v.id)]=expected;
     }
-    m_settings->setValue("missionPlans/"+missionPlanKey(),QVariantMap{{"version",1},{"points",points},{"vehicles",vehicles},
-        {"signatures",signatures},{"sequences",sequences},{"separation",m_minimumSeparation},{"rtl",m_planRtl}});
+    m_settings->setValue("missionPlans/"+missionPlanKey(),QVariantMap{{"version",2},{"geometryVersion",m_planGeometryVersion},{"points",points},{"vehicles",vehicles},
+        {"signatures",signatures},{"missions",missions},{"sequences",sequences},{"separation",m_minimumSeparation},{"rtl",m_planRtl}});
     m_settings->sync();
 }
 bool VehicleLink::restorePlanMetadata() {
     const auto saved=m_settings->value("missionPlans/"+missionPlanKey()).toMap();
-    if (saved.value("version").toInt()!=1 || saved.value("points").toList().isEmpty()) return false;
+    if ((saved.value("version").toInt()!=1 && saved.value("version").toInt()!=2) || saved.value("points").toList().isEmpty()) return false;
     const auto signatures=saved.value("signatures").toMap();
-    for (const auto &v:m_planVehicles)
-        if (signatures.value(QString::number(v.id)).toString()!=missionSignature(v.id,m_plannedMissions.value(v.id))) return false;
+    auto frame=[](int value) { return value==MAV_FRAME_GLOBAL_INT ? MAV_FRAME_GLOBAL : value==MAV_FRAME_GLOBAL_RELATIVE_ALT_INT ? MAV_FRAME_GLOBAL_RELATIVE_ALT
+        : value==MAV_FRAME_GLOBAL_TERRAIN_ALT_INT ? MAV_FRAME_GLOBAL_TERRAIN_ALT : value; };
+    for (const auto &v:m_planVehicles) {
+        if (signatures.value(QString::number(v.id)).toString()==missionSignature(v.id,m_plannedMissions.value(v.id))) continue;
+        const auto expected=saved.value("missions").toMap().value(QString::number(v.id)).toList();
+        const auto actual=m_plannedMissions.value(v.id);
+        if (expected.isEmpty() || expected.size()!=actual.size()) return false;
+        const int row=rowForSystem(v.id);
+        const bool ardupilot=row>=0 && m_peers[row].autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA;
+        for (int seq=0;seq<actual.size();++seq) {
+            const auto e=expected[seq].toMap(); const auto &a=actual[seq];
+            if (ardupilot && seq==0 && a.command==MAV_CMD_NAV_WAYPOINT) continue;
+            if (e.value("command").toInt()!=a.command || (navigation(a) && frame(e.value("frame").toInt())!=frame(a.frame))) return false;
+            const double params[]={a.param1,a.param2,a.param3,a.param4,a.z};
+            const QString keys[]={"p1","p2","p3","p4","z"};
+            for (int n=0;n<5;++n) {
+                if (ardupilot && a.command==MAV_CMD_NAV_WAYPOINT && n==1) continue; // Copter does not retain acceptance-radius param2.
+                const double value=e.value(keys[n]).toDouble();
+                if ((std::isfinite(value)!=std::isfinite(params[n])) || (std::isfinite(value) && std::abs(value-params[n])>0.001)) return false;
+            }
+            // Some firmware stores coordinates through float precision. Account for
+            // that quantization while still requiring every command and parameter to match.
+            if (navigation(a)) {
+                if (QGeoCoordinate(e.value("x").toInt()/1e7,e.value("y").toInt()/1e7).distanceTo(QGeoCoordinate(a.x/1e7,a.y/1e7))>2) return false;
+            } else if (e.value("x").toInt()!=a.x || e.value("y").toInt()!=a.y) return false;
+        }
+    }
     m_planPoints.clear();
     for (const auto &entry:saved.value("points").toList()) {
         const auto p=entry.toMap(); m_planPoints.append({p.value("latitude").toDouble(),p.value("longitude").toDouble(),p.value("altitude").toDouble(),p.value("speed").toDouble()});
@@ -121,6 +150,7 @@ bool VehicleLink::restorePlanMetadata() {
     m_pointSequences.clear();
     for (const auto &v:m_planVehicles) for (const auto &seq:saved.value("sequences").toMap().value(QString::number(v.id)).toList()) m_pointSequences[v.id].append(seq.toInt());
     m_minimumSeparation=saved.value("separation",5).toDouble(); m_planRtl=saved.value("rtl").toBool(); m_planValid=true;
+    m_planGeometryVersion=saved.value("geometryVersion",1).toInt();
     return true;
 }
 
@@ -147,19 +177,33 @@ bool VehicleLink::recoverGeneratedPlan() {
         if (!takeoff) return false;
     }
     const int count=stages.value(m_planVehicles.first().id).size();
-    if (!count || (m_planVehicles.size()>1 && count%3)) return false;
+    const bool oldGeometry=m_planVehicles.size()>1 && count%3==0;
+    const bool laneGeometry=m_planVehicles.size()>1 && count>=5 && (count-2)%3==0;
+    if (!count || (m_planVehicles.size()>1 && !oldGeometry && !laneGeometry)) return false;
+    QList<int> indexes{-1};
+    if (m_planVehicles.size()==1) for (int n=0;n<count;++n) indexes.append(n);
+    else if (oldGeometry) for (int n=2;n<count;n+=3) indexes.append(n);
+    else {
+        const int points=(count-2)/3; int cursor=0;
+        for (int p=0;p<points;++p) {
+            ++cursor; if (p==0) ++cursor; ++cursor;
+            if (p==points-1) ++cursor;
+            indexes.append(cursor++);
+        }
+    }
     for (const auto &v:m_planVehicles) {
         const auto list=stages.value(v.id); if (list.size()!=count) return false;
-        if (m_planVehicles.size()>1) for (int n=0;n<count;n+=3) {
-            const auto prev=n ? list[n-1] : starts.value(v.id);
-            if (QGeoCoordinate(prev.lat,prev.lon).distanceTo(QGeoCoordinate(list[n].lat,list[n].lon))>0.5
-                || QGeoCoordinate(list[n+1].lat,list[n+1].lon).distanceTo(QGeoCoordinate(list[n+2].lat,list[n+2].lon))>0.5
-                || std::abs((list[n].alt-prev.alt)-(list[n+1].alt-list[n+2].alt))>0.2) return false;
+        if (m_planVehicles.size()>1) for (int p=1;p<indexes.size();++p) {
+            const int begin=indexes[p-1]+1,end=indexes[p];
+            const auto prev=begin ? list[begin-1] : starts.value(v.id);
+            const int transit=begin+1+(laneGeometry && p==1 ? 1 : 0);
+            const int settleFrom=end-1;
+            if (QGeoCoordinate(prev.lat,prev.lon).distanceTo(QGeoCoordinate(list[begin].lat,list[begin].lon))>0.5
+                || QGeoCoordinate(list[settleFrom].lat,list[settleFrom].lon).distanceTo(QGeoCoordinate(list[end].lat,list[end].lon))>0.5
+                || std::abs((list[begin].alt-prev.alt)-(list[transit].alt-list[end].alt))>0.2) return false;
         }
     }
     QList<PlanPoint> points; QMap<int,QList<int>> sequences;
-    const int step=m_planVehicles.size()>1 ? 3 : 1;
-    QList<int> indexes{-1}; for (int n=step-1;n<count;n+=step) indexes.append(n);
     for (int index:indexes) {
         double x=0,y=0,z=0,alt=0,speed=0;
         for (const auto &v:m_planVehicles) {
@@ -171,6 +215,14 @@ bool VehicleLink::recoverGeneratedPlan() {
         points.append({std::atan2(z,std::hypot(x,y))*180/pi,std::atan2(y,x)*180/pi,alt,speed});
     }
     for (auto &v:m_planVehicles) { const auto s=starts.value(v.id); v.latitude=s.lat; v.longitude=s.lon; }
+    QList<double> layers;
+    for (const auto &v:m_planVehicles) layers.append(stages.value(v.id).first().alt-starts.value(v.id).alt);
+    std::sort(layers.begin(),layers.end());
+    double spacing=std::numeric_limits<double>::infinity();
+    for (int n=1;n<layers.size();++n) if (layers[n]-layers[n-1]>0.01) spacing=std::min(spacing,layers[n]-layers[n-1]);
+    const double separation=spacing-(oldGeometry ? 1 : 3);
+    if (separation>=0.3 && separation<=1000) m_minimumSeparation=separation;
     m_planPoints=points; m_pointSequences=sequences; m_planRtl=rtl; m_planValid=true;
+    m_planGeometryVersion=oldGeometry ? 1 : 2;
     return true;
 }

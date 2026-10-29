@@ -88,6 +88,58 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void routeRelativeLanesRecalculateAfterDrag() {
+        VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[3]; link.toggle();
+        for (int n=0;n<3;++n) { QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0)); heartbeat(vehicles[n],link,n+1); }
+        QTRY_COMPARE(link.count(),3);
+        for (int n=0;n<3;++n) {
+            mavlink_global_position_int_t p{}; p.lat=397683968; p.lon=-861580992+n*2368; p.alt=220000;
+            mavlink_message_t message{}; mavlink_msg_global_position_int_encode(n+1,1,&message,&p); sendPacket(vehicles[n],link,message);
+        }
+        QTRY_VERIFY(link.vehicleDetails(3).value("positionValid").toBool());
+        link.selectGroup("Ungrouped"); link.togglePlan();
+        for (int n=0;n<3;++n) downloadMission(vehicles[n],link,n+1,{});
+        QTRY_VERIFY(!link.missionBusy()); link.setMinimumSeparation(15.24);
+        // The actual connected swarm's east-west 2-to-3 leg previously shared one ground track.
+        link.addPlanWaypoint(39.7697664,-86.155648);
+        link.addPlanWaypoint(39.7712448,-86.1576384);
+        link.addPlanWaypoint(39.7712288,-86.1596224);
+        link.addPlanWaypoint(39.7702144,-86.159552);
+        link.addPlanWaypoint(39.768928,-86.1601856);
+        QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
+        auto coordinate=[&](int id,int point) {
+            link.setPlanVehicleId(id); const auto p=link.planItems()[point].toMap();
+            return QGeoCoordinate(p.value("latitude").toDouble(),p.value("longitude").toDouble());
+        };
+        auto verifyLanes=[&]() {
+            const auto centers=link.planCenterPath();
+            const auto p=centers[2].toMap(),q=centers[3].toMap();
+            const QGeoCoordinate origin(p.value("latitude").toDouble(),p.value("longitude").toDouble());
+            const QGeoCoordinate destination(q.value("latitude").toDouble(),q.value("longitude").toDouble());
+            const double bearing=origin.azimuthTo(destination)*3.141592653589793/180;
+            auto crossTrack=[&](QGeoCoordinate c) {
+                const double angle=origin.azimuthTo(c)*3.141592653589793/180;
+                return origin.distanceTo(c)*std::sin(angle-bearing);
+            };
+            for (int a=1;a<=3;++a) for (int b=a+1;b<=3;++b) {
+                const double start=crossTrack(coordinate(a,2))-crossTrack(coordinate(b,2));
+                const double end=crossTrack(coordinate(a,3))-crossTrack(coordinate(b,3));
+                QVERIFY(std::abs(start)>=18.0); QVERIFY(std::abs(end)>=18.0);
+                QVERIFY(std::abs(start-end)<0.2); // Distinct parallel lanes, not merely vertical separation.
+            }
+        };
+        verifyLanes();
+        QList<QGeoCoordinate> before,neighbor;
+        for (int id=1;id<=3;++id) { before.append(coordinate(id,3)); neighbor.append(coordinate(id,2)); }
+        link.movePlanWaypoint(3,39.7723,-86.1598);
+        QVERIFY2(link.planValid(),qPrintable(link.planStatus())); verifyLanes();
+        for (int id=1;id<=3;++id) QVERIFY(coordinate(id,3).distanceTo(before[id-1])>10);
+        QVERIFY(coordinate(1,2).distanceTo(neighbor[0])>1); // Dragging recalculates the preceding corner as well.
+        QVERIFY(coordinate(3,2).distanceTo(neighbor[2])>1);
+        const auto last1=coordinate(1,5),last3=coordinate(3,5);
+        QVERIFY(std::abs(last1.latitude()-last3.latitude())<1e-6);
+        QVERIFY(std::abs((last3.longitude()-last1.longitude())-0.0004736)<1e-6);
+    }
     void missionFilteringAndFlyPaths() {
         VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[2]; link.toggle();
         QList<mavlink_mission_item_int_t> missions[2];
@@ -201,7 +253,7 @@ private slots:
         mavlink_msg_mission_ack_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,MAV_MISSION_ACCEPTED,MAV_MISSION_TYPE_MISSION,0); sendPacket(vehicle,link,msg);
         QTRY_VERIFY(!link.missionBusy()); QVERIFY(link.planStatus().contains("saved"));
         const auto originalCenters=link.planCenterPath();
-        const auto actualPaths=link.flightPaths(); QVERIFY(!actualPaths.isEmpty());
+        auto actualPaths=link.flightPaths(); QVERIFY(!actualPaths.isEmpty());
         link.togglePlan(); QVERIFY(!link.planActive());
         QCOMPARE(link.flightPaths(),actualPaths);
         link.togglePlan(); QVERIFY(link.planActive());
@@ -210,11 +262,15 @@ private slots:
             QTest::qWait(45);
             saved.target_system=255; saved.target_component=MAV_COMP_ID_MISSIONPLANNER;
             saved.current=0; // Current mission item may change without changing the route.
+            if (saved.seq>0 && (saved.command==MAV_CMD_NAV_TAKEOFF || saved.command==MAV_CMD_NAV_WAYPOINT)) saved.frame=MAV_FRAME_GLOBAL_RELATIVE_ALT;
+            else saved.frame=MAV_FRAME_GLOBAL;
+            if (saved.command==MAV_CMD_NAV_WAYPOINT && saved.seq>0) { saved.param2=0; saved.x+=4; } // Firmware canonicalization.
             mavlink_msg_mission_item_int_encode(1,1,&msg,&saved); sendPacket(vehicle,link,msg);
         }
         QTRY_VERIFY(!link.missionBusy());
         QCOMPARE(link.planCenterPath(),originalCenters);
         QVERIFY(link.planItems().last().toMap().value("editable").toBool());
+        actualPaths=link.flightPaths();
         link.selectPlanItem(1); QCOMPARE(link.selectedPlanItem(),1);
         link.movePlanWaypoint(1,39.002,-86.002);
         QCOMPARE(link.planCenterPath().last().toMap().value("latitude").toDouble(),39.002);
@@ -284,11 +340,11 @@ private slots:
         link.addPlanWaypoint(39.002,-86.002);
         QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
         const auto compact=link.planPaths();
-        const auto compactA=compact[0].toMap().value("path").toList()[1].toMap();
-        const auto compactB=compact[1].toMap().value("path").toList()[2].toMap();
+        link.setPlanVehicleId(1); const auto compactA=link.planItems()[1].toMap();
+        link.setPlanVehicleId(2); const auto compactB=link.planItems()[1].toMap();
         const double spacing=QGeoCoordinate(compactA.value("latitude").toDouble(),compactA.value("longitude").toDouble())
             .distanceTo(QGeoCoordinate(compactB.value("latitude").toDouble(),compactB.value("longitude").toDouble()));
-        QVERIFY(spacing>=5 && spacing<10); // Intermediate slots compact around the clicked center.
+        QVERIFY(spacing>=5 && spacing<15); // Route-relative corner slots keep horizontal clearance.
         link.removePlanItem(2);
         link.setMinimumSeparation(100); QVERIFY(!link.planValid());
         link.setMinimumSeparation(5); QVERIFY(link.planValid());
