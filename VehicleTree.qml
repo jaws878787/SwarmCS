@@ -72,8 +72,8 @@ Rectangle {
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
         Column {
             width: vehicleScroll.availableWidth
-            padding: 8
-            spacing: 6
+            padding: 12
+            spacing: 9
             Repeater {
                 model: vehicleLink.groups
                 delegate: Column {
@@ -81,8 +81,8 @@ Rectangle {
                     required property string modelData
                     property string groupTitle: modelData
                     property bool expanded: true
-                    width: parent.width - 16
-                    spacing: 4
+                    width: parent.width - 24
+                    spacing: 6
                     Button {
                         width: parent.width
                         implicitHeight: 28
@@ -107,7 +107,7 @@ Rectangle {
             }
             Label {
                 visible: vehicleLink.count === 0
-                width: parent.width - 16
+                width: parent.width - 24
                 text: vehicleLink.listening ? "Waiting for vehicle heartbeats…" : "Connect to discover vehicles."
                 color: "#8098a9"
                 font.pixelSize: 12

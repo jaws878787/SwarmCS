@@ -144,7 +144,7 @@ ApplicationWindow {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: Math.min(170, window.width * 0.42)
+        width: Math.min(255, window.width * 0.42)
     }
     Rectangle {
         visible: window.noticeText.length > 0
