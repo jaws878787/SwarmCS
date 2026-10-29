@@ -18,6 +18,8 @@ ApplicationWindow {
     property real mapZoom: 12
     property bool autoCenterAllowed: true
     property int searchDots: 0
+    property int selectedSystemId: 0
+    property string noticeText: ""
     palette.window: "#17242f"
     palette.windowText: "#e5edf3"
     palette.base: "#101820"
@@ -59,6 +61,17 @@ ApplicationWindow {
             }
         }
     }
+    Connections {
+        target: vehicleLink
+        function onCenterRequested(systemId, latitude, longitude) {
+            window.selectedSystemId = systemId
+            window.autoCenterAllowed = false
+            window.mapCenter = QtPositioning.coordinate(latitude, longitude)
+            window.mapZoom = Math.max(window.mapZoom, 17)
+        }
+        function onNotice(message) { window.noticeText = message; noticeTimer.restart() }
+    }
+    Timer { id: noticeTimer; interval: 6500; onTriggered: window.noticeText = "" }
     header: ToolBar {
         height: 64
         background: Rectangle { color: "#101820" }
@@ -131,7 +144,19 @@ ApplicationWindow {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: Math.min(332, window.width * 0.42)
+        width: Math.min(170, window.width * 0.42)
+    }
+    Rectangle {
+        visible: window.noticeText.length > 0
+        anchors.top: parent.top
+        anchors.topMargin: 12
+        anchors.horizontalCenter: mapLoader.horizontalCenter
+        width: Math.min(460, mapLoader.width - 24)
+        height: noticeLabel.implicitHeight + 24
+        radius: 6
+        color: "#ee17242f"
+        border.color: "#466372"
+        Label { id: noticeLabel; anchors.fill: parent; anchors.margins: 12; text: window.noticeText; textFormat: Text.PlainText; wrapMode: Text.WordWrap }
     }
     Button {
         anchors.right: parent.right

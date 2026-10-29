@@ -2,42 +2,18 @@
 #include <QNetworkDatagram>
 #include <cmath>
 #include <algorithm>
+#include <QSet>
 
 namespace {
-QString flightMode(quint8 autopilot, quint8 baseMode, quint32 customMode) {
-    if (!(baseMode & MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)) return "Unknown";
-    if (autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA) {
-        // ArduCopter mode numbers: ArduPilot/ArduCopter/mode.h.
-        static const QHash<quint32, QString> modes = {
-            {0, "Stabilize"}, {1, "Acro"}, {2, "Alt Hold"}, {3, "Auto"}, {4, "Guided"},
-            {5, "Loiter"}, {6, "RTL"}, {7, "Circle"}, {9, "Land"}, {11, "Drift"},
-            {13, "Sport"}, {14, "Flip"}, {15, "Autotune"}, {16, "PosHold"}, {17, "Brake"},
-            {18, "Throw"}, {19, "Avoid ADS-B"}, {20, "Guided No GPS"}, {21, "Smart RTL"},
-            {22, "FlowHold"}, {23, "Follow"}, {24, "ZigZag"}, {25, "System ID"},
-            {26, "Autorotate"}, {27, "Auto RTL"}, {28, "Turtle"}
-        };
-        return modes.value(customMode, QString("Mode %1").arg(customMode));
+QString commandResult(quint8 result) {
+    switch (result) {
+    case MAV_RESULT_TEMPORARILY_REJECTED: return "temporarily rejected";
+    case MAV_RESULT_DENIED: return "denied by vehicle";
+    case MAV_RESULT_UNSUPPORTED: return "unsupported by vehicle";
+    case MAV_RESULT_FAILED: return "failed";
+    case MAV_RESULT_CANCELLED: return "cancelled";
+    default: return QString("rejected (%1)").arg(result);
     }
-    // PX4 custom_mode packs main_mode in bits 16..23 and sub_mode in bits 24..31.
-    const auto main = (customMode >> 16) & 0xff;
-    const auto sub = (customMode >> 24) & 0xff;
-    if (main == 4) {
-        static const QHash<quint32, QString> modes = {
-            {1, "Ready"}, {2, "Takeoff"}, {3, "Hold"}, {4, "Mission"}, {5, "RTL"},
-            {6, "Land"}, {8, "Follow"}, {9, "Precision Land"}, {10, "VTOL Takeoff"},
-            {19, "Guided Course"}, {20, "Descend"}
-        };
-        if (sub >= 11 && sub <= 18) return QString("External %1").arg(sub - 10);
-        return modes.value(sub, QString("Auto (%1)").arg(sub));
-    }
-    if (main == 3 && sub == 1) return "Orbit";
-    if (main == 3 && sub == 2) return "Position Slow";
-    static const QHash<quint32, QString> modes = {
-        {1, "Manual"}, {2, "Altitude"}, {3, "Position"}, {5, "Acro"}, {6, "Offboard"},
-        {7, "Stabilized"}, {8, "Rattitude"}, {9, "Simple"}, {10, "Termination"},
-        {11, "Altitude Cruise"}, {12, "Manual Parking"}
-    };
-    return modes.value(main, QString("Mode %1/%2").arg(main).arg(sub));
 }
 }
 
@@ -45,6 +21,8 @@ VehicleLink::VehicleLink(QObject *parent, const QString &settingsFile, quint16 p
     : QAbstractListModel(parent),
       m_settings(settingsFile.isEmpty() ? std::make_unique<QSettings>()
           : std::make_unique<QSettings>(settingsFile, QSettings::IniFormat)), m_port(port) {
+    m_resolvedNames = resolvedNames();
+    m_velocityUnit = m_settings->value("display/velocityUnit", "kph").toString() == "mph" ? "mph" : "kph";
     m_groups = {"Ungrouped"};
     for (const auto &group : m_settings->value("vehicleGroups/list").toStringList())
         if (!group.trimmed().isEmpty() && !m_groups.contains(group, Qt::CaseInsensitive)) m_groups.append(group);
@@ -59,7 +37,10 @@ int VehicleLink::rowCount(const QModelIndex &parent) const { return parent.isVal
 QHash<int, QByteArray> VehicleLink::roleNames() const {
     return {{SystemIdRole, "systemId"}, {VehicleNameRole, "vehicleName"}, {FirmwareRole, "firmware"},
         {ArmedRole, "armed"}, {FlightModeRole, "flightMode"}, {AltitudeRole, "altitude"},
-        {VelocityRole, "velocity"}, {VehicleGroupRole, "vehicleGroup"}};
+        {VelocityRole, "velocity"}, {VehicleGroupRole, "vehicleGroup"},
+        {LatitudeRole, "latitude"}, {LongitudeRole, "longitude"}, {HeadingRole, "heading"},
+        {PositionValidRole, "positionValid"}, {IconIdRole, "iconId"},
+        {CommandPendingRole, "commandPending"}, {CommandStatusRole, "commandStatus"}};
 }
 
 QVariant VehicleLink::data(const QModelIndex &index, int role) const {
@@ -68,7 +49,7 @@ QVariant VehicleLink::data(const QModelIndex &index, int role) const {
     switch (role) {
     case SystemIdRole: return peer.systemId;
     case VehicleNameRole: return nameForSystem(peer.systemId);
-    case FirmwareRole: return peer.autopilot == MAV_AUTOPILOT_PX4 ? "PX4" : "ArduCopter";
+    case FirmwareRole: return peer.autopilot == MAV_AUTOPILOT_PX4 ? "PX4" : isPlane(peer) ? "ArduPlane" : "ArduCopter";
     case ArmedRole: return peer.armed;
     case FlightModeRole: return peer.flightMode;
     case AltitudeRole: return peer.altitudeTime >= 0 && m_clock.elapsed() - peer.altitudeTime <= 5000
@@ -76,6 +57,13 @@ QVariant VehicleLink::data(const QModelIndex &index, int role) const {
     case VelocityRole: return peer.velocityTime >= 0 && m_clock.elapsed() - peer.velocityTime <= 5000
         ? peer.velocity : std::numeric_limits<double>::quiet_NaN();
     case VehicleGroupRole: return groupForSystem(peer.systemId);
+    case LatitudeRole: return peer.latitude;
+    case LongitudeRole: return peer.longitude;
+    case HeadingRole: return peer.heading;
+    case PositionValidRole: return positionValid(peer);
+    case IconIdRole: return iconForPeer(peer);
+    case CommandPendingRole: return peer.pendingCommand != 0;
+    case CommandStatusRole: return peer.commandStatus;
     default: return {};
     }
 }
@@ -86,9 +74,218 @@ int VehicleLink::rowForSystem(int systemId) const {
     return -1;
 }
 
-QString VehicleLink::nameForSystem(int systemId) const {
+QString VehicleLink::baseNameForSystem(int systemId) const {
     const auto saved = m_settings->value(QString("vehicleNames/%1").arg(systemId)).toString().trimmed();
     return saved.isEmpty() ? QString("Vehicle %1").arg(systemId) : saved;
+}
+
+QMap<int, QString> VehicleLink::resolvedNames() const {
+    QMap<int, QString> bases, resolved;
+    QHash<QString,int> counts, suffixes;
+    QSet<QString> reserved, used;
+    // Include stored offline identities and default names so labels remain unique on reconnect.
+    for (int id = 1; id <= 255; ++id) {
+        const auto base = baseNameForSystem(id);
+        bases[id] = base;
+        ++counts[base.toCaseFolded()];
+        reserved.insert(base.toCaseFolded());
+    }
+    for (auto it = bases.cbegin(); it != bases.cend(); ++it) {
+        const auto key = it.value().toCaseFolded();
+        auto name = it.value();
+        if (counts[key] > 1) {
+            do { name = it.value() + " " + QString::number(++suffixes[key]); }
+            while (reserved.contains(name.toCaseFolded()) || used.contains(name.toCaseFolded()));
+        }
+        used.insert(name.toCaseFolded());
+        resolved[it.key()] = name;
+    }
+    return resolved;
+}
+
+QString VehicleLink::nameForSystem(int systemId) const {
+    return m_resolvedNames.value(systemId, QString("Vehicle %1").arg(systemId));
+}
+
+bool VehicleLink::isPlane(const Peer &peer) const {
+    return peer.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA &&
+        (peer.vehicleType == MAV_TYPE_FIXED_WING || (peer.vehicleType >= 19 && peer.vehicleType <= 25));
+}
+
+bool VehicleLink::positionValid(const Peer &peer) const {
+    return peer.positionTime >= 0 && m_clock.elapsed() - peer.positionTime <= 5000
+        && std::isfinite(peer.latitude) && std::isfinite(peer.longitude);
+}
+
+QString VehicleLink::iconForPeer(const Peer &peer) const {
+    const auto saved = m_settings->value(QString("vehicleIcons/%1").arg(peer.systemId)).toString();
+    const QStringList allowed = isPlane(peer) ? QStringList{"fixed","delta","wing"}
+        : QStringList{"quad","hex","octo","bullet"};
+    return allowed.contains(saved) ? saved : allowed.first();
+}
+
+QString VehicleLink::modeName(const Peer &peer) const {
+    if (peer.standardMode) {
+        for (const auto &mode : peer.reportedModes)
+            if (mode.standardMode == peer.standardMode) return mode.name;
+    }
+    for (const auto &mode : peer.reportedModes)
+        if (mode.id == peer.customMode && (!mode.standardMode || mode.id) && !mode.name.isEmpty()) return mode.name;
+    for (const auto &mode : firmwareModes(peer.autopilot, isPlane(peer)))
+        if (mode.id == peer.customMode) return mode.name;
+    return peer.standardMode ? standardModeName(peer.standardMode) : QString("Mode %1").arg(peer.customMode);
+}
+
+bool VehicleLink::reportedModesComplete(const Peer &peer) const {
+    return peer.expectedModes > 0 && peer.reportedModes.size() == peer.expectedModes;
+}
+
+QVariantMap VehicleLink::vehicleDetails(int systemId) const {
+    const int row = rowForSystem(systemId);
+    QVariantMap result{{"connected", row >= 0}, {"nameInput", baseNameForSystem(systemId)}};
+    if (row < 0) return result;
+    const auto roles = roleNames();
+    for (auto it = roles.cbegin(); it != roles.cend(); ++it)
+        result.insert(QString::fromUtf8(it.value()), data(index(row), it.key()));
+    result.insert("reportedModes", reportedModesComplete(m_peers[row]));
+    result.insert("customMode", m_peers[row].customMode);
+    result.insert("standardMode", m_peers[row].standardMode);
+    return result;
+}
+
+QVariantList VehicleLink::iconOptions(int systemId) const {
+    const int row = rowForSystem(systemId);
+    if (row < 0) return {};
+    const QList<QPair<QString,QString>> choices = isPlane(m_peers[row])
+        ? QList<QPair<QString,QString>>{{"fixed","Fixed wing"},{"delta","Delta wing"},{"wing","Wing"}}
+        : QList<QPair<QString,QString>>{{"quad","Quadcopter"},{"hex","Hexacopter"},{"octo","Octocopter"},{"bullet","Bullet drone"}};
+    QVariantList result;
+    for (const auto &choice : choices) result.append(QVariantMap{{"id",choice.first},{"name",choice.second}});
+    return result;
+}
+
+bool VehicleLink::setVehicleIcon(int systemId, const QString &icon) {
+    const auto choices = iconOptions(systemId);
+    const bool valid = std::any_of(choices.cbegin(),choices.cend(),
+        [&](const QVariant &entry) { return entry.toMap().value("id").toString() == icon; });
+    if (!valid) return false;
+    m_settings->setValue(QString("vehicleIcons/%1").arg(systemId), icon);
+    m_settings->sync();
+    const int row = rowForSystem(systemId);
+    emit dataChanged(index(row),index(row),{IconIdRole});
+    return m_settings->status() == QSettings::NoError;
+}
+
+QVariantList VehicleLink::availableModes(int systemId) const {
+    const int row = rowForSystem(systemId);
+    if (row < 0) return {};
+    const auto &peer = m_peers[row];
+    const auto options = reportedModesComplete(peer) ? peer.reportedModes.values()
+        : firmwareModes(peer.autopilot,isPlane(peer));
+    QVariantList result;
+    for (const auto &option : options) result.append(QVariantMap{{"id",option.id},{"name",option.name},
+        {"standardMode",option.standardMode},{"enabled",option.enabled}});
+    return result;
+}
+
+void VehicleLink::refreshModes(int systemId) {
+    const int row = rowForSystem(systemId);
+    if (row < 0) return;
+    m_peers[row].modeRequests = 0;
+    requestModes(m_peers[row]);
+}
+
+void VehicleLink::requestModes(Peer &peer) {
+    sendCommand(peer,MAV_CMD_REQUEST_MESSAGE,MAVLINK_MSG_ID_AVAILABLE_MODES,0);
+    peer.modesRequestedAt = m_clock.elapsed();
+    ++peer.modeRequests;
+}
+
+void VehicleLink::centerVehicle(int systemId) {
+    const int row = rowForSystem(systemId);
+    if (row < 0 || !positionValid(m_peers[row])) {
+        emit notice(nameForSystem(systemId) + ": position is not available yet.");
+        return;
+    }
+    const auto &peer = m_peers[row];
+    emit centerRequested(systemId,peer.latitude,peer.longitude);
+}
+
+void VehicleLink::toggleVelocityUnit() {
+    m_velocityUnit = m_velocityUnit == "kph" ? "mph" : "kph";
+    m_settings->setValue("display/velocityUnit",m_velocityUnit);
+    m_settings->sync();
+    emit velocityUnitChanged();
+}
+
+bool VehicleLink::sendCommand(Peer &peer, quint16 command, float p1, float p2, float p3) {
+    mavlink_message_t message{};
+    mavlink_status_t status{};
+    status.current_tx_seq = m_sequence++;
+    mavlink_msg_command_long_pack_status(255,MAV_COMP_ID_MISSIONPLANNER,&status,&message,
+        peer.systemId,peer.componentId,command,0,p1,p2,p3,0,0,0,0);
+    return send(message,peer);
+}
+
+bool VehicleLink::setArmed(int systemId, bool armed) {
+    const int row = rowForSystem(systemId);
+    if (row < 0) { emit notice("Vehicle is disconnected."); return false; }
+    auto &peer = m_peers[row];
+    if (peer.pendingCommand) { emit notice("Wait for the current vehicle request."); return false; }
+    if (peer.armed == armed) return true;
+    // param2 remains zero: never bypass flight-controller arming/disarming checks.
+    if (!sendCommand(peer,MAV_CMD_COMPONENT_ARM_DISARM,armed ? 1 : 0,0)) return false;
+    peer.pendingCommand = MAV_CMD_COMPONENT_ARM_DISARM;
+    peer.desiredArmed = armed;
+    peer.commandDeadline = m_clock.elapsed() + 10000;
+    peer.commandStatus = armed ? "Requesting arm…" : "Requesting disarm…";
+    emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
+    emit notice(nameForSystem(systemId) + ": " + peer.commandStatus);
+    return true;
+}
+
+bool VehicleLink::setFlightMode(int systemId, quint32 mode, int standardMode) {
+    const int row = rowForSystem(systemId);
+    if (row < 0) { emit notice("Vehicle is disconnected."); return false; }
+    auto &peer = m_peers[row];
+    if (peer.pendingCommand) { emit notice("Wait for the current vehicle request."); return false; }
+    const auto options = availableModes(systemId);
+    const bool valid = std::any_of(options.cbegin(),options.cend(),[&](const QVariant &entry) {
+        const auto item = entry.toMap();
+        return item.value("id").toUInt() == mode && item.value("standardMode").toInt() == standardMode
+            && item.value("enabled").toBool();
+    });
+    if (!valid) { emit notice("This flight mode is not selectable."); return false; }
+    if ((!standardMode && peer.customMode == mode) || (standardMode && peer.standardMode == standardMode)) return true;
+    const quint16 command = standardMode ? MAV_CMD_DO_SET_STANDARD_MODE : MAV_CMD_DO_SET_MODE;
+    const float p1 = standardMode ? standardMode : MAV_MODE_FLAG_CUSTOM_MODE_ENABLED;
+    const float p2 = standardMode ? 0 : peer.autopilot == MAV_AUTOPILOT_PX4 ? (mode >> 16) & 0xff : mode;
+    const float p3 = !standardMode && peer.autopilot == MAV_AUTOPILOT_PX4 ? (mode >> 24) & 0xff : 0;
+    if (!sendCommand(peer,command,p1,p2,p3)) return false;
+    peer.pendingCommand = command;
+    peer.desiredMode = mode;
+    peer.desiredStandardMode = standardMode;
+    peer.commandDeadline = m_clock.elapsed() + 10000;
+    peer.commandStatus = "Requesting flight mode…";
+    emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
+    emit notice(nameForSystem(systemId) + ": " + peer.commandStatus);
+    return true;
+}
+
+void VehicleLink::finishCommand(Peer &peer, const QString &message) {
+    peer.pendingCommand = 0;
+    peer.commandStatus = message;
+    const int row = rowForSystem(peer.systemId);
+    emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
+    emit notice(nameForSystem(peer.systemId) + ": " + message);
+}
+
+void VehicleLink::confirmState(Peer &peer) {
+    if (peer.pendingCommand == MAV_CMD_COMPONENT_ARM_DISARM && peer.armed == peer.desiredArmed)
+        finishCommand(peer,peer.armed ? "Armed." : "Disarmed.");
+    else if ((peer.pendingCommand == MAV_CMD_DO_SET_MODE && peer.customMode == peer.desiredMode)
+        || (peer.pendingCommand == MAV_CMD_DO_SET_STANDARD_MODE && peer.standardMode == peer.desiredStandardMode))
+        finishCommand(peer,"Flight mode changed to " + peer.flightMode + ".");
 }
 
 QString VehicleLink::groupForSystem(int systemId) const {
@@ -111,13 +308,14 @@ bool VehicleLink::renameVehicle(int systemId, const QString &name) {
     if (systemId < 1 || systemId > 255 || trimmed.isEmpty() || trimmed.size() > 64) return false;
     m_settings->setValue(QString("vehicleNames/%1").arg(systemId), trimmed);
     m_settings->sync();
-    const int row = rowForSystem(systemId);
-    if (row >= 0) emit dataChanged(index(row), index(row), {VehicleNameRole});
+    m_resolvedNames = resolvedNames();
+    if (!m_peers.isEmpty()) emit dataChanged(index(0),index(m_peers.size()-1),{VehicleNameRole});
     return m_settings->status() == QSettings::NoError;
 }
 
 void VehicleLink::clearVehicleNames() {
     m_settings->remove("vehicleNames");
+    m_resolvedNames = resolvedNames();
     m_settings->sync();
     if (!m_peers.isEmpty()) emit dataChanged(index(0), index(m_peers.size() - 1), {VehicleNameRole});
 }
@@ -181,7 +379,9 @@ void VehicleLink::receive() {
                     || heartbeat.type == MAV_TYPE_HELICOPTER || heartbeat.type == MAV_TYPE_HEXAROTOR
                     || heartbeat.type == MAV_TYPE_OCTOROTOR || heartbeat.type == MAV_TYPE_TRICOPTER
                     || heartbeat.type == MAV_TYPE_DODECAROTOR || heartbeat.type == MAV_TYPE_DECAROTOR;
-                if (!copter || (heartbeat.autopilot != MAV_AUTOPILOT_ARDUPILOTMEGA
+                const bool aircraft = copter || heartbeat.type == MAV_TYPE_FIXED_WING
+                    || (heartbeat.type >= 19 && heartbeat.type <= 25);
+                if (!aircraft || (heartbeat.autopilot != MAV_AUTOPILOT_ARDUPILOTMEGA
                     && heartbeat.autopilot != MAV_AUTOPILOT_PX4)) continue;
                 const bool added = row < 0;
                 if (added) {
@@ -198,13 +398,20 @@ void VehicleLink::receive() {
                 peer.port = static_cast<quint16>(datagram.senderPort());
                 peer.lastSeen = m_clock.elapsed();
                 peer.autopilot = heartbeat.autopilot;
+                peer.vehicleType = heartbeat.type;
                 peer.armed = heartbeat.base_mode & MAV_MODE_FLAG_SAFETY_ARMED;
-                peer.flightMode = flightMode(heartbeat.autopilot, heartbeat.base_mode, heartbeat.custom_mode);
+                if (peer.customMode != heartbeat.custom_mode) peer.standardMode = 0;
+                peer.customMode = heartbeat.custom_mode;
+                peer.flightMode = heartbeat.base_mode & MAV_MODE_FLAG_CUSTOM_MODE_ENABLED ? modeName(peer) : "Unknown";
                 if (added) {
                     endInsertRows();
                     requestTelemetry(peer);
+                    requestModes(peer);
                     structureChanged = true;
-                } else emit dataChanged(index(row), index(row), {FirmwareRole, ArmedRole, FlightModeRole});
+                } else {
+                    confirmState(peer);
+                    emit dataChanged(index(row),index(row),{FirmwareRole,ArmedRole,FlightModeRole,IconIdRole});
+                }
             } else if (row >= 0) {
                 auto &peer = m_peers[row];
                 // Only accept telemetry from the discovered flight controller endpoint/component.
@@ -213,11 +420,18 @@ void VehicleLink::receive() {
                 if (message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {
                     mavlink_global_position_int_t position{};
                     mavlink_msg_global_position_int_decode(&message, &position);
+                    const double latitude = position.lat / 1e7, longitude = position.lon / 1e7;
+                    if (latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180) {
+                        peer.latitude = latitude;
+                        peer.longitude = longitude;
+                        peer.positionTime = m_clock.elapsed();
+                    }
+                    if (position.hdg != UINT16_MAX) peer.heading = position.hdg / 100.0;
                     peer.altitude = position.relative_alt / 1000.0;
                     peer.altitudeTime = m_clock.elapsed();
                     peer.velocity = std::hypot(double(position.vx), double(position.vy)) / 100.0;
                     peer.velocityTime = m_clock.elapsed();
-                    emit dataChanged(index(row), index(row), {AltitudeRole, VelocityRole});
+                    emit dataChanged(index(row),index(row),{AltitudeRole,VelocityRole,LatitudeRole,LongitudeRole,HeadingRole,PositionValidRole});
                 } else if (message.msgid == MAVLINK_MSG_ID_VFR_HUD) {
                     mavlink_vfr_hud_t hud{};
                     mavlink_msg_vfr_hud_decode(&message, &hud);
@@ -226,6 +440,64 @@ void VehicleLink::receive() {
                         peer.velocityTime = m_clock.elapsed();
                         emit dataChanged(index(row), index(row), {VelocityRole});
                     }
+                } else if (message.msgid == MAVLINK_MSG_ID_COMMAND_ACK) {
+                    mavlink_command_ack_t ack{};
+                    mavlink_msg_command_ack_decode(&message,&ack);
+                    if (!peer.pendingCommand || ack.command != peer.pendingCommand
+                        || (ack.target_system && ack.target_system != 255)
+                        || (ack.target_component && ack.target_component != MAV_COMP_ID_MISSIONPLANNER)) continue;
+                    if (ack.result == MAV_RESULT_ACCEPTED || ack.result == MAV_RESULT_IN_PROGRESS) {
+                        peer.commandStatus = ack.result == MAV_RESULT_ACCEPTED
+                            ? "Accepted; waiting for vehicle state…" : "Vehicle request in progress…";
+                        if (ack.result == MAV_RESULT_IN_PROGRESS) peer.commandDeadline = m_clock.elapsed() + 15000;
+                        emit dataChanged(index(row),index(row),{CommandStatusRole});
+                        if (peer.pendingCommand == MAV_CMD_DO_SET_STANDARD_MODE)
+                            sendCommand(peer,MAV_CMD_REQUEST_MESSAGE,MAVLINK_MSG_ID_CURRENT_MODE);
+                    } else finishCommand(peer,commandResult(ack.result) + ".");
+                } else if (message.msgid == MAVLINK_MSG_ID_AVAILABLE_MODES) {
+                    mavlink_available_modes_t mode{};
+                    mavlink_msg_available_modes_decode(&message,&mode);
+                    if (!mode.number_modes || !mode.mode_index || mode.mode_index > mode.number_modes) continue;
+                    if ((mode.seq && peer.modeSequence && mode.seq != peer.modeSequence)
+                        || (peer.expectedModes && peer.expectedModes != mode.number_modes))
+                        peer.reportedModes.clear();
+                    peer.expectedModes = mode.number_modes;
+                    if (mode.seq) peer.modeSequence = mode.seq;
+                    const auto bytes = QByteArray(mode.mode_name,sizeof(mode.mode_name));
+                    QString name = QString::fromUtf8(bytes.split('\0').first()).trimmed();
+                    if (name.isEmpty()) {
+                        Peer temporary = peer;
+                        temporary.customMode = mode.custom_mode;
+                        temporary.standardMode = mode.standard_mode;
+                        temporary.reportedModes.clear();
+                        name = mode.standard_mode ? standardModeName(mode.standard_mode) : modeName(temporary);
+                    }
+                    peer.reportedModes[mode.mode_index] = {mode.custom_mode,name,mode.standard_mode,
+                        !(mode.properties & MAV_MODE_PROPERTY_NOT_USER_SELECTABLE)};
+                    if (reportedModesComplete(peer)) {
+                        peer.flightMode = modeName(peer);
+                        emit dataChanged(index(row),index(row),{FlightModeRole});
+                        emit modeListChanged(peer.systemId);
+                    }
+                } else if (message.msgid == MAVLINK_MSG_ID_AVAILABLE_MODES_MONITOR) {
+                    mavlink_available_modes_monitor_t monitor{};
+                    mavlink_msg_available_modes_monitor_decode(&message,&monitor);
+                    if (monitor.seq && monitor.seq != peer.modeSequence) {
+                        peer.modeSequence = monitor.seq;
+                        peer.reportedModes.clear();
+                        peer.expectedModes = 0;
+                        peer.modeRequests = 0;
+                        requestModes(peer);
+                        emit modeListChanged(peer.systemId);
+                    }
+                } else if (message.msgid == MAVLINK_MSG_ID_CURRENT_MODE) {
+                    mavlink_current_mode_t mode{};
+                    mavlink_msg_current_mode_decode(&message,&mode);
+                    peer.customMode = mode.custom_mode;
+                    peer.standardMode = mode.standard_mode;
+                    peer.flightMode = modeName(peer);
+                    confirmState(peer);
+                    emit dataChanged(index(row),index(row),{FlightModeRole});
                 }
             }
         }
@@ -237,10 +509,10 @@ void VehicleLink::receive() {
     updateStatus();
 }
 
-void VehicleLink::send(const mavlink_message_t &message, const Peer &peer) {
+bool VehicleLink::send(const mavlink_message_t &message, const Peer &peer) {
     uint8_t bytes[MAVLINK_MAX_PACKET_LEN];
     const auto length = mavlink_msg_to_send_buffer(bytes, &message);
-    m_socket.writeDatagram(reinterpret_cast<const char *>(bytes), length, peer.address, peer.port);
+    return m_socket.writeDatagram(reinterpret_cast<const char *>(bytes), length, peer.address, peer.port) == length;
 }
 
 void VehicleLink::requestTelemetry(const Peer &peer) {
@@ -259,6 +531,8 @@ void VehicleLink::tick() {
     bool removed = false;
     for (int row = m_peers.size() - 1; row >= 0; --row) {
         if (m_clock.elapsed() - m_peers[row].lastSeen > 5000) {
+            if (m_peers[row].pendingCommand)
+                emit notice(nameForSystem(m_peers[row].systemId) + ": disconnected before state confirmation.");
             beginRemoveRows({}, row, row);
             m_peers.removeAt(row);
             endRemoveRows();
@@ -270,8 +544,14 @@ void VehicleLink::tick() {
     tx.current_tx_seq = m_sequence++;
     mavlink_msg_heartbeat_pack_status(255, MAV_COMP_ID_MISSIONPLANNER, &tx, &message,
         MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0, MAV_STATE_ACTIVE);
-    for (const auto &peer : m_peers) send(message, peer);
-    if (!m_peers.isEmpty()) emit dataChanged(index(0), index(m_peers.size() - 1), {AltitudeRole, VelocityRole});
+    for (auto &peer : m_peers) {
+        send(message,peer);
+        if (peer.pendingCommand && m_clock.elapsed() >= peer.commandDeadline)
+            finishCommand(peer,"No state confirmation received; request timed out.");
+        if (!reportedModesComplete(peer) && peer.modeRequests < 3
+            && m_clock.elapsed() - peer.modesRequestedAt > 3000) requestModes(peer);
+    }
+    if (!m_peers.isEmpty()) emit dataChanged(index(0), index(m_peers.size() - 1), {AltitudeRole, VelocityRole, PositionValidRole});
     if (removed) {
         emit groupsChanged();
         emit changed();

@@ -12,46 +12,89 @@ Rectangle {
     required property double altitude
     required property double velocity
     required property string vehicleGroup
-    signal contextRequested(int sysId, string name)
-    implicitHeight: details.implicitHeight + 28
-    radius: 8
-    color: hover.hovered ? "#223542" : "#1a2a36"
-    border.color: hover.hovered ? "#456273" : "#2b3f4d"
+    required property string iconId
+    required property bool commandPending
+    signal contextRequested(int sysId)
+    signal settingsRequested(int sysId)
+    signal modesRequested(int sysId)
+    implicitHeight: details.implicitHeight + 14
     Accessible.role: Accessible.ListItem
     Accessible.name: vehicleName + ", " + firmware + ", " + (armed ? "Armed" : "Disarmed") + ", " + flightMode
+    radius: 4
+    color: hover.hovered ? "#223542" : "#1a2a36"
+    border.color: hover.hovered ? "#456273" : "#2b3f4d"
     HoverHandler { id: hover }
-    TapHandler {
-        acceptedButtons: Qt.RightButton
-        onTapped: card.contextRequested(card.systemId, card.vehicleName)
-    }
-    ColumnLayout {
-        id: details
+    MouseArea {
         anchors.fill: parent
-        anchors.margins: 14
-        spacing: 6
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        onClicked: function(mouse) {
+            if (mouse.button === Qt.RightButton) card.contextRequested(card.systemId)
+            else vehicleLink.centerVehicle(card.systemId)
+        }
+    }
+   ColumnLayout {
+        id: details
+        z: 1
+        anchors.fill: parent
+        anchors.margins: 7
+        spacing: 2
         RowLayout {
             Layout.fillWidth: true
-            Label { text: card.vehicleName; font.pixelSize: 17; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-            Label { text: "#" + card.systemId; color: "#8098a9"; font.pixelSize: 11 }
+            spacing: 2
+            VehicleIcon { kind: card.iconId; Layout.preferredWidth: 13; Layout.preferredHeight: 13 }
+            Label { text: card.vehicleName; textFormat: Text.PlainText; font.pixelSize: 9; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
+            ToolButton {
+                text: "\u2699"
+                font.pixelSize: 12
+                implicitWidth: 17
+                implicitHeight: 15
+                padding: 0
+                Accessible.name: "Settings for " + card.vehicleName
+                ToolTip.visible: hovered
+                ToolTip.text: "Vehicle settings"
+                onClicked: card.settingsRequested(card.systemId)
+            }
         }
-        Label { text: card.firmware; color: "#879eae"; font.pixelSize: 11 }
+        Label { text: card.firmware + " · #" + card.systemId; color: "#879eae"; font.pixelSize: 6 }
         RowLayout {
-            Layout.topMargin: 5
-            Layout.fillWidth: true
-            Label { text: card.armed ? "Armed" : "Disarmed"; color: card.armed ? "#ffc078" : "#71cdbd"; font.pixelSize: 17; font.bold: true }
-            Item { Layout.fillWidth: true }
-            Label { text: card.flightMode; color: "#d9e4eb"; font.pixelSize: 14; elide: Text.ElideRight; Layout.maximumWidth: 140 }
+            Layout.topMargin: 1
+            spacing: 2
+            Label { text: card.armed ? "Armed" : "Disarmed"; color: card.armed ? "#ffc078" : "#71cdbd"; font.pixelSize: 9; font.bold: true }
+            Label {
+                text: card.flightMode + " ▾"
+                color: "#d9e4eb"
+                font.pixelSize: 7
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Change flight mode for " + card.vehicleName
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: card.modesRequested(card.systemId) }
+            }
         }
-        Rectangle { Layout.fillWidth: true; height: 1; color: "#304451"; Layout.topMargin: 6; Layout.bottomMargin: 4 }
-        GridLayout {
-            Layout.fillWidth: true
-            columns: 2
-            columnSpacing: 16
-            rowSpacing: 3
-            Label { text: "Altitude"; color: "#8ba2b2"; font.pixelSize: 11; Layout.fillWidth: true; Layout.preferredWidth: 1 }
-            Label { text: "Velocity"; color: "#8ba2b2"; font.pixelSize: 11; Layout.fillWidth: true; Layout.preferredWidth: 1 }
-            Label { text: Number.isFinite(card.altitude) ? card.altitude.toFixed(1) + " m" : "—"; font.pixelSize: 17; Layout.fillWidth: true; Layout.preferredWidth: 1 }
-            Label { text: Number.isFinite(card.velocity) ? card.velocity.toFixed(1) + " m/s" : "—"; font.pixelSize: 17; Layout.fillWidth: true; Layout.preferredWidth: 1 }
+        Rectangle { Layout.fillWidth: true; height: 0.5; color: "#304451"; Layout.topMargin: 2; Layout.bottomMargin: 1 }
+        RowLayout {
+            spacing: 6
+            ColumnLayout {
+                spacing: 2
+                Label { text: "Altitude"; color: "#8ba2b2"; font.pixelSize: 6 }
+                Label { text: Number.isFinite(card.altitude) ? card.altitude.toFixed(1) + " m" : "—"; font.pixelSize: 9 }
+            }
+            Item {
+                implicitWidth: speedColumn.implicitWidth
+                implicitHeight: speedColumn.implicitHeight
+                Accessible.role: Accessible.Button
+                Accessible.name: "Toggle velocity units, currently " + vehicleLink.velocityUnit
+                ColumnLayout {
+                    id: speedColumn
+                    spacing: 2
+                    Label { text: "Velocity"; color: "#8ba2b2"; font.pixelSize: 6 }
+                    Label {
+                        text: Number.isFinite(card.velocity) ? (card.velocity * (vehicleLink.velocityUnit === "kph" ? 3.6 : 2.2369362921)).toFixed(1) + " " + vehicleLink.velocityUnit : "—"
+                        font.pixelSize: 9
+                    }
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: vehicleLink.toggleVelocityUnit() }
+            }
         }
     }
 }

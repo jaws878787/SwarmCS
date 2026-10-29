@@ -6,10 +6,44 @@ Rectangle {
     id: tree
     color: "#111d26"
     property int selectedSystemId: 0
-    property string selectedName: ""
-    function openVehicleMenu(systemId, name) {
+    property var selectedVehicle: ({})
+    property var iconChoices: []
+    property var modeEntries: []
+    property bool iconsExpanded: false
+    function refreshSelected() {
+        if (selectedSystemId > 0) selectedVehicle = vehicleLink.vehicleDetails(selectedSystemId)
+    }
+    function openSettings(systemId) {
         selectedSystemId = systemId
-        selectedName = name
+        refreshSelected()
+        settingsName.text = selectedVehicle.nameInput
+        settingsError.text = ""
+        iconChoices = vehicleLink.iconOptions(systemId)
+        iconsExpanded = false
+        settingsDialog.open()
+    }
+    function openModes(systemId) {
+        selectedSystemId = systemId
+        refreshSelected()
+        modeEntries = vehicleLink.availableModes(systemId)
+        vehicleLink.refreshModes(systemId)
+        modeDialog.open()
+    }
+    Connections {
+        target: vehicleLink
+        function onDataChanged() { tree.refreshSelected() }
+        function onRowsRemoved() { tree.refreshSelected() }
+        function onModelReset() { tree.refreshSelected() }
+        function onModeListChanged(systemId) {
+            if (systemId === tree.selectedSystemId) {
+                tree.refreshSelected()
+                if (modeDialog.visible) tree.modeEntries = vehicleLink.availableModes(systemId)
+            }
+        }
+    }
+    function openVehicleMenu(systemId) {
+        selectedSystemId = systemId
+        refreshSelected()
         vehicleMenu.popup()
     }
     Rectangle {
@@ -17,11 +51,11 @@ Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 62
+        height: 48
         color: "#162530"
         RowLayout {
             anchors.fill: parent
-            anchors.margins: 18
+            anchors.margins: 12
             Label { text: "Vehicles"; font.pixelSize: 19; font.bold: true; Layout.fillWidth: true }
             Label { text: vehicleLink.count; color: "#91a9b9"; font.pixelSize: 13 }
         }
@@ -38,8 +72,8 @@ Rectangle {
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
         Column {
             width: vehicleScroll.availableWidth
-            padding: 12
-            spacing: 12
+            padding: 8
+            spacing: 6
             Repeater {
                 model: vehicleLink.groups
                 delegate: Column {
@@ -47,11 +81,11 @@ Rectangle {
                     required property string modelData
                     property string groupTitle: modelData
                     property bool expanded: true
-                    width: parent.width - 24
-                    spacing: 8
+                    width: parent.width - 16
+                    spacing: 4
                     Button {
                         width: parent.width
-                        implicitHeight: 34
+                        implicitHeight: 28
                         text: (section.expanded ? "▾  " : "▸  ") + section.groupTitle
                               + "  (" + (vehicleLink.groupCounts[section.groupTitle] || 0) + ")"
                         Accessible.name: section.groupTitle + " vehicle group"
@@ -64,14 +98,16 @@ Rectangle {
                         delegate: VehicleCard {
                             width: section.width
                             visible: section.expanded && vehicleGroup === section.groupTitle
-                            onContextRequested: function(sysId, name) { tree.openVehicleMenu(sysId, name) }
+                            onContextRequested: function(sysId) { tree.openVehicleMenu(sysId) }
+                            onSettingsRequested: function(sysId) { tree.openSettings(sysId) }
+                            onModesRequested: function(sysId) { tree.openModes(sysId) }
                         }
                     }
                 }
             }
             Label {
                 visible: vehicleLink.count === 0
-                width: parent.width - 24
+                width: parent.width - 16
                 text: vehicleLink.listening ? "Waiting for vehicle heartbeats…" : "Connect to discover vehicles."
                 color: "#8098a9"
                 font.pixelSize: 12
@@ -91,14 +127,9 @@ Rectangle {
         popupType: Popup.Item
         cascade: true
         MenuItem {
-            text: "Rename vehicle…"
-            onTriggered: {
-                renameField.text = tree.selectedName
-                renameError.text = ""
-                renameDialog.open()
-                renameField.forceActiveFocus()
-                renameField.selectAll()
-            }
+            text: tree.selectedVehicle.armed ? "Disarm" : "Arm"
+            enabled: tree.selectedVehicle.connected === true && !tree.selectedVehicle.commandPending
+            onTriggered: vehicleLink.setArmed(tree.selectedSystemId, !tree.selectedVehicle.armed)
         }
         Menu {
             id: groupMenu
@@ -127,30 +158,142 @@ Rectangle {
         }
     }
     Dialog {
-        id: renameDialog
+        id: settingsDialog
         parent: Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(380, parent.width - 32)
         modal: true
-        title: "Rename vehicle · SYSID " + tree.selectedSystemId
+        title: "Vehicle settings · SYSID " + tree.selectedSystemId
+        standardButtons: Dialog.Close
         ColumnLayout {
             width: parent.width
+            spacing: 12
             Label { text: "Vehicle name" }
-            TextField { id: renameField; Layout.fillWidth: true; maximumLength: 64; placeholderText: "Vehicle name" }
-            Label { id: renameError; color: "#ffb6a2"; visible: text.length > 0; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-        }
-        footer: DialogButtonBox {
-            standardButtons: DialogButtonBox.Cancel
-            Button {
-                text: "Save"
-                enabled: renameField.text.trim().length > 0
-                DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
-                onClicked: {
-                    if (vehicleLink.renameVehicle(tree.selectedSystemId, renameField.text)) renameDialog.close()
-                    else renameError.text = "The name could not be saved. Please try again."
+            TextField {
+                id: settingsName
+                Layout.fillWidth: true
+                maximumLength: 64
+                placeholderText: "Vehicle name"
+                onTextEdited: {
+                    if (text.trim().length > 0) {
+                        settingsError.text = vehicleLink.renameVehicle(tree.selectedSystemId, text)
+                            ? "" : "The name could not be saved."
+                    }
                 }
             }
-            onRejected: renameDialog.close()
+            Label {
+                text: "Map label: " + (tree.selectedVehicle.vehicleName || "")
+                textFormat: Text.PlainText
+                color: "#91a9b9"
+                font.pixelSize: 11
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+            Label { text: "Vehicle icon" }
+            Button {
+                Layout.fillWidth: true
+                implicitHeight: 46
+                onClicked: tree.iconsExpanded = !tree.iconsExpanded
+                contentItem: RowLayout {
+                    spacing: 10
+                    VehicleIcon { kind: tree.selectedVehicle.iconId || "quad"; Layout.preferredWidth: 30; Layout.preferredHeight: 30 }
+                    Label {
+                        text: {
+                            const selected = tree.iconChoices.find(item => item.id === tree.selectedVehicle.iconId)
+                            return selected ? selected.name : "Choose icon"
+                        }
+                        Layout.fillWidth: true
+                    }
+                    Label { text: tree.iconsExpanded ? "▴" : "▾" }
+                }
+                Accessible.name: "Choose vehicle icon"
+            }
+            GridLayout {
+                visible: tree.iconsExpanded
+                columns: 2
+                columnSpacing: 8
+                rowSpacing: 8
+                Layout.fillWidth: true
+                Repeater {
+                    model: tree.iconChoices
+                    delegate: Button {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        implicitHeight: 78
+                        checked: tree.selectedVehicle.iconId === modelData.id
+                        Accessible.name: modelData.name + " icon"
+                        onClicked: {
+                            if (vehicleLink.setVehicleIcon(tree.selectedSystemId, modelData.id)) {
+                                settingsError.text = ""
+                                tree.iconsExpanded = false
+                                tree.refreshSelected()
+                            } else settingsError.text = "The icon could not be saved."
+                        }
+                        background: Rectangle {
+                            radius: 6
+                            color: parent.checked ? "#254b4b" : "#223541"
+                            border.color: parent.checked ? "#66cbbb" : "#36505f"
+                        }
+                        contentItem: ColumnLayout {
+                            spacing: 4
+                            VehicleIcon { kind: modelData.id; Layout.preferredWidth: 34; Layout.preferredHeight: 34; Layout.alignment: Qt.AlignHCenter }
+                            Label { text: modelData.name; Layout.alignment: Qt.AlignHCenter; font.pixelSize: 12 }
+                        }
+                    }
+                }
+            }
+            Label { id: settingsError; color: "#ffb6a2"; visible: text.length > 0; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            Label { text: "Changes are saved as you type."; color: "#91a9b9"; font.pixelSize: 11 }
+        }
+    }
+    Dialog {
+        id: modeDialog
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(360, parent.width - 32)
+        height: Math.min(540, parent.height - 48)
+        modal: true
+        title: "Flight mode · " + (tree.selectedVehicle.vehicleName || "")
+        standardButtons: Dialog.Close
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+            Label {
+                text: tree.selectedVehicle.reportedModes ? "Modes reported by this vehicle"
+                    : "Firmware defaults · unavailable modes may be rejected by the vehicle."
+                wrapMode: Text.WordWrap
+                color: "#91a9b9"
+                font.pixelSize: 12
+                Layout.fillWidth: true
+            }
+            Label {
+                visible: tree.selectedVehicle.commandPending === true
+                text: tree.selectedVehicle.commandStatus || ""
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: tree.modeEntries
+                spacing: 3
+                ScrollBar.vertical: ScrollBar {}
+                delegate: Button {
+                    required property var modelData
+                    width: ListView.view.width
+                    implicitHeight: 36
+                    text: modelData.name
+                    checked: modelData.standardMode ? tree.selectedVehicle.standardMode === modelData.standardMode
+                        : tree.selectedVehicle.customMode === modelData.id
+                    enabled: tree.selectedVehicle.connected === true && !tree.selectedVehicle.commandPending && modelData.enabled
+                    onClicked: {
+                        if (vehicleLink.setFlightMode(tree.selectedSystemId, modelData.id, modelData.standardMode))
+                            modeDialog.close()
+                    }
+                }
+            }
         }
     }
     Dialog {

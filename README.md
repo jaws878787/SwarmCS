@@ -26,11 +26,15 @@ Run the UDP integration tests with `ctest --test-dir build -C Debug --output-on-
 
 Configure ArduPilot SITL, PX4 SITL, or your telemetry router to send MAVLink UDP to this computer's IP on port **14550**, then click **Connect**. UDP discovery listens for incoming traffic; it does not scan network addresses. Permit incoming UDP 14550 through the firewall, and close any other GCS using that port. The map needs internet access for tiles; OpenStreetMap attribution remains visible.
 
-Connected vehicles appear in the left Vehicles tree, initially stacked under Ungrouped. Each card shows its name, firmware type, armed state, active flight mode, altitude relative to home (metres), and horizontal ground speed labelled Velocity (m/s). Missing or stale telemetry displays a dash. SwarmCS requests position and ground-speed messages at 2 Hz when a vehicle is discovered.
+Connected vehicles appear in the left Vehicles tree, initially stacked under Ungrouped. Cards use a 50% scale and compact label spacing. Each shows its name, firmware type, armed state, active flight mode, altitude relative to home (metres), and horizontal ground speed labelled Velocity. Left-click Velocity to switch every card between kph and mph; the unit preference is saved. Missing or stale telemetry displays a dash. SwarmCS requests position and ground-speed messages at 2 Hz when a vehicle is discovered.
 
-Right-click a vehicle to rename it or use the Add to group submenu to choose/create a group. Names, groups, and memberships are saved locally with Qt settings; vehicle identity uses the MAVLink system ID, which must be unique across connected vehicles. Right-click the Vehicles title to clear all saved vehicle names, including offline vehicles, and restore the default Vehicle N names. Group assignments remain intact.
+Each card's gear opens vehicle settings. Names save as you type, with collisions automatically numbered in system-ID order (including saved offline identities). The input keeps the requested base name while the displayed name includes any necessary suffix. Icon choices also persist by sysID: ArduCopter/PX4 offer quadcopter, hexacopter, octocopter, and bullet drone silhouettes; ArduPlane offers fixed wing, delta wing, and wing silhouettes. A saved name labels each valid, fresh map position. Clicking the card centers and zooms to its position.
 
-Flight commands, arming, mission planning, position markers, and connection settings will be added separately. Signed MAVLink authentication is not configured yet. The app only sends GCS heartbeats and telemetry interval requests; it does not arm vehicles or change flight modes.
+Right-click a vehicle for Arm/Disarm or the Add to group submenu. Names, icons, groups, and memberships are saved locally with Qt settings; vehicle identity uses the MAVLink system ID, which must be unique across connected vehicles. Right-click the Vehicles title to clear saved names, including offline vehicles, restoring default Vehicle N names. Icons and group assignments remain intact.
+
+Click a card's flight mode to choose another mode. SwarmCS queries the MAVLink available-modes service and uses its complete mode list when supported, otherwise displaying firmware defaults. Unsupported or non-selectable modes cannot be forced. Requests use the firmware's ArduPilot/PX4 mode encoding, and arm/disarm always leaves force flags unset. Pending commands are confirmed by heartbeat/current-mode telemetry; rejection and timeout messages appear over the map. Only commands selected by the user are sent; no automatic arming or mode changes occur.
+
+Mission planning and functional connection settings will be added separately. Signed MAVLink authentication is not configured yet.
 
 ## Local three-vehicle SITL
 
