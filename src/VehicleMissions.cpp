@@ -13,6 +13,34 @@ Vec local(const QGeoCoordinate &origin,const QGeoCoordinate &point,double altitu
     const auto distance=origin.distanceTo(point), bearing=origin.azimuthTo(point)*pi/180;
     return {distance*std::sin(bearing),distance*std::cos(bearing),altitude};
 }
+QList<int> minimumTravelAssignment(const QList<Vec> &from,const QList<Vec> &targetSlots) {
+    const int count=from.size();
+    QList<double> u(count+1,0),v(count+1,0);
+    QList<int> owner(count+1,0),previous(count+1,0),result(count,0);
+    for (int row=1;row<=count;++row) {
+        owner[0]=row; int column=0;
+        QList<double> best(count+1,std::numeric_limits<double>::infinity());
+        QList<bool> used(count+1,false);
+        do {
+            used[column]=true; const int current=owner[column];
+            double delta=std::numeric_limits<double>::infinity(); int next=0;
+            for (int candidate=1;candidate<=count;++candidate) if (!used[candidate]) {
+                const auto d=from[current-1]-targetSlots[candidate-1];
+                const double cost=std::hypot(d.x,d.y)-u[current]-v[candidate];
+                if (cost<best[candidate]) { best[candidate]=cost; previous[candidate]=column; }
+                if (best[candidate]<delta) { delta=best[candidate]; next=candidate; }
+            }
+            for (int candidate=0;candidate<=count;++candidate) {
+                if (used[candidate]) { u[owner[candidate]]+=delta; v[candidate]-=delta; }
+                else best[candidate]-=delta;
+            }
+            column=next;
+        } while (owner[column]);
+        do { const int next=previous[column]; owner[column]=owner[next]; column=next; } while (column);
+    }
+    for (int column=1;column<=count;++column) result[owner[column]-1]=column-1;
+    return result;
+}
 QGeoCoordinate geographic(const QGeoCoordinate &origin,Vec point) {
     return origin.atDistanceAndAzimuth(std::hypot(point.x,point.y),std::atan2(point.x,point.y)*180/pi);
 }
@@ -166,7 +194,7 @@ void VehicleLink::removePlanItem(int row) {
 }
 
 void VehicleLink::rebuildPlan() {
-    m_planGeometryVersion=2;
+    m_planGeometryVersion=3;
     m_plannedMissions.clear(); m_pointSequences.clear(); m_planValid=false;
     if (m_planVehicles.isEmpty()) { emit planChanged(); return; }
     // Build route-relative lanes in one local metric frame, including across the date line.
@@ -189,11 +217,24 @@ void VehicleLink::rebuildPlan() {
             error="Starting/landing formation is closer than minimum separation. Move vehicles apart or reduce separation.";
     }
     QList<Vec> centers,normals,laneBasis;
+    QList<int> laneDirections;
+    int reassignments=0;
     for (const auto &point:m_planPoints) centers.append(local(origin,QGeoCoordinate(point.latitude,point.longitude)));
     for (int p=1;p<centers.size();++p) {
         const auto d=centers[p]-centers[p-1]; const double length=std::hypot(d.x,d.y);
-        if (length<0.5) { if (offsets.size()>1) error="Separate adjacent center waypoints by at least 0.5 m."; normals.append({0,1,0}); }
-        else normals.append({-d.y/length,d.x/length,0});
+        Vec normal{0,1,0};
+        if (length<0.5) { if (offsets.size()>1) error="Separate adjacent center waypoints by at least 0.5 m."; }
+        else normal={-d.y/length,d.x/length,0};
+        int direction=1;
+        if (!normals.isEmpty()) {
+            const double alignment=dot(normals.last(),normal);
+            direction=std::abs(alignment)<1e-9 ? laneDirections.last() : alignment<0 ? -1 : 1;
+            if (direction!=laneDirections.last()) reassignments+=offsets.size()-(offsets.size()%2);
+        }
+        // A lane is an unoriented line: reversing travel need not keep a drone
+        // tied to the same left/right slot. Reverse slot ownership for the
+        // outgoing leg (and retain it thereafter) to avoid a hairpin crossing.
+        normals.append({normal.x*direction,normal.y*direction,0}); laneDirections.append(direction);
     }
     for (int p=0;p<centers.size();++p) {
         if (normals.isEmpty()) laneBasis.append({0,1,0});
@@ -202,8 +243,8 @@ void VehicleLink::rebuildPlan() {
         else {
             const auto a=normals[p-1],b=normals[p];
             const double denominator=1+a.x*b.x+a.y*b.y;
-            if (denominator<0.125) {
-                if (offsets.size()>1) error="Turn too sharp for separate horizontal lanes. Move the neighboring waypoints.";
+            if (denominator<1e-6) {
+                if (offsets.size()>1) error="Unable to assign separated lanes at this turn.";
                 laneBasis.append(a);
             } else laneBasis.append({(a.x+b.x)/denominator,(a.y+b.y)/denominator,0});
         }
@@ -216,6 +257,10 @@ void VehicleLink::rebuildPlan() {
     QList<double> laneSlots(offsets.size(),0);
     const double laneSpacing=m_minimumSeparation+3; // Reserve room for coordinate quantization and tracking.
     for (int rank=0;rank<order.size();++rank) laneSlots[order[rank]]=(rank-(order.size()-1)/2.0)*laneSpacing;
+    QList<Vec> arrivalSlots;
+    for (double slot:laneSlots) arrivalSlots.append({laneBasis.last().x*slot,laneBasis.last().y*slot,0});
+    const auto landingAssignment=minimumTravelAssignment(arrivalSlots,offsets);
+    for (int n=0;n<landingAssignment.size();++n) if (landingAssignment[n]!=n) ++reassignments;
     QList<QList<Vec>> stages;
     QList<double> stageSpeeds;
     QList<int> stagePointEnds;
@@ -223,9 +268,12 @@ void VehicleLink::rebuildPlan() {
         const auto &point=m_planPoints[pointIndex];
         const auto center=centers[pointIndex];
         QList<Vec> nodes;
-        for (int n=0;n<offsets.size();++n) nodes.append({center.x+(original ? offsets[n].x : laneBasis[pointIndex].x*laneSlots[n]),
-            center.y+(original ? offsets[n].y : laneBasis[pointIndex].y*laneSlots[n]),
-            m_planVehicles[n].homeAltitude+point.altitude+(layered ? n*laneSpacing : 0)});
+        for (int n=0;n<offsets.size();++n) {
+            const int slot=original && pointIndex>0 && pointIndex==m_planPoints.size()-1 ? landingAssignment[n] : n;
+            nodes.append({center.x+(original ? offsets[slot].x : laneBasis[pointIndex].x*laneSlots[n]),
+                center.y+(original ? offsets[slot].y : laneBasis[pointIndex].y*laneSlots[n]),
+                m_planVehicles[n].homeAltitude+point.altitude+(layered ? n*laneSpacing : 0)});
+        }
         return nodes;
     };
     auto appendStage=[&](int point,bool layered,bool original,double speed,int logical=-1) {
@@ -296,7 +344,7 @@ void VehicleLink::rebuildPlan() {
     }
     m_planValid=error.isEmpty() && (m_planPoints.size()>1 || m_planRtl);
     m_planStatus=!error.isEmpty() ? error : m_planPoints.size()==1 && !m_planRtl ? "Click the map to add a waypoint."
-        : QString("Separation checked · nominal route %1 s · synchronized speed targets").arg(std::ceil(totalSeconds));
+        : QString("Separation checked · %1 slot reassignments · nominal route %2 s").arg(reassignments).arg(std::ceil(totalSeconds));
     emit planChanged();
 }
 
@@ -417,7 +465,7 @@ void VehicleLink::finishMissionDownloads() {
         if (any) {
             if (restorePlanMetadata() || recoverGeneratedPlan()) {
                 m_loadedPlan=false;
-                if (m_planGeometryVersion<2) {
+                if (m_planGeometryVersion<3) {
                     rebuildPlan();
                     if (m_planValid) m_planStatus="Recalculated horizontal lanes. Upload to apply to vehicles.";
                 } else m_planStatus="Restored center route and downloaded vehicle missions.";

@@ -88,6 +88,65 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void waypointSlotsTradeAtReversals_data() {
+        QTest::addColumn<int>("vehicleCount");
+        QTest::newRow("two")<<2;
+        QTest::newRow("three-active-draft")<<3;
+        QTest::newRow("five")<<5;
+    }
+    void waypointSlotsTradeAtReversals() {
+        QFETCH(int,vehicleCount);
+        VehicleLink link(nullptr,settingsFile()+QString::number(vehicleCount),0); QUdpSocket vehicles[5]; link.toggle();
+        for (int n=0;n<vehicleCount;++n) { QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0)); heartbeat(vehicles[n],link,n+1); }
+        QTRY_COMPARE(link.count(),vehicleCount);
+        for (int n=0;n<vehicleCount;++n) {
+            mavlink_global_position_int_t p{}; p.lat=397683968; p.lon=-861580992+n*2368; p.alt=220000;
+            mavlink_message_t message{}; mavlink_msg_global_position_int_encode(n+1,1,&message,&p); sendPacket(vehicles[n],link,message);
+        }
+        QTRY_VERIFY(link.vehicleDetails(vehicleCount).value("positionValid").toBool());
+        link.selectGroup("Ungrouped"); link.togglePlan();
+        for (int n=0;n<vehicleCount;++n) downloadMission(vehicles[n],link,n+1,{});
+        QTRY_VERIFY(!link.missionBusy()); link.setMinimumSeparation(15.24);
+        // The user's active six-waypoint draft: waypoint 3 reverses the route.
+        link.addPlanWaypoint(39.769766,-86.155648);
+        link.addPlanWaypoint(39.771245,-86.157638);
+        link.addPlanWaypoint(39.771064,-86.155516);
+        link.addPlanWaypoint(39.770214,-86.159550);
+        link.addPlanWaypoint(39.768928,-86.160184);
+        link.addPlanWaypoint(39.768161,-86.159175);
+        link.addPlanRtl();
+        QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
+        auto coordinate=[&](int id,int point) {
+            link.setPlanVehicleId(id); const auto p=link.planItems()[point].toMap();
+            return QGeoCoordinate(p.value("latitude").toDouble(),p.value("longitude").toDouble());
+        };
+        const auto centers=link.planCenterPath();
+        auto center=[&](int index) { const auto p=centers[index].toMap(); return QGeoCoordinate(p.value("latitude").toDouble(),p.value("longitude").toDouble()); };
+        auto crossTrack=[&](int leg,QGeoCoordinate c) {
+            const auto origin=center(leg),destination=center(leg+1);
+            return origin.distanceTo(c)*std::sin((origin.azimuthTo(c)-origin.azimuthTo(destination))*3.141592653589793/180);
+        };
+        const double incoming=crossTrack(2,coordinate(1,3))-crossTrack(2,coordinate(vehicleCount,3));
+        const double outgoing=crossTrack(3,coordinate(1,3))-crossTrack(3,coordinate(vehicleCount,3));
+        QVERIFY(incoming*outgoing<0); // Outer vehicles trade left/right slots at the reversal.
+        for (int a=1;a<=vehicleCount;++a) for (int b=a+1;b<=vehicleCount;++b) {
+            const double start=crossTrack(3,coordinate(a,3))-crossTrack(3,coordinate(b,3));
+            const double end=crossTrack(3,coordinate(a,4))-crossTrack(3,coordinate(b,4));
+            QVERIFY(std::abs(start)>=18.0); QVERIFY(std::abs(end)>=18.0);
+            QVERIFY(start*end>0); QVERIFY(std::abs(start-end)<0.2);
+        }
+        QList<double> startLongitudes,endLongitudes;
+        double startMean=0,endMean=0;
+        for (int id=1;id<=vehicleCount;++id) {
+            const double start=coordinate(id,0).longitude(),end=coordinate(id,6).longitude();
+            startLongitudes.append(start); endLongitudes.append(end); startMean+=start/vehicleCount; endMean+=end/vehicleCount;
+        }
+        std::sort(startLongitudes.begin(),startLongitudes.end()); std::sort(endLongitudes.begin(),endLongitudes.end());
+        for (int n=0;n<vehicleCount;++n) QVERIFY(std::abs((startLongitudes[n]-startMean)-(endLongitudes[n]-endMean))<1e-6);
+        link.movePlanWaypoint(3,39.771229,-86.159622); QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
+        link.movePlanWaypoint(3,39.771064,-86.155516); QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
+        link.setMinimumSeparation(1000); QVERIFY(!link.planValid()); // Assignment never bypasses the separation guard.
+    }
     void routeRelativeLanesRecalculateAfterDrag() {
         VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[3]; link.toggle();
         for (int n=0;n<3;++n) { QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0)); heartbeat(vehicles[n],link,n+1); }
@@ -138,7 +197,7 @@ private slots:
         QVERIFY(coordinate(3,2).distanceTo(neighbor[2])>1);
         const auto last1=coordinate(1,5),last3=coordinate(3,5);
         QVERIFY(std::abs(last1.latitude()-last3.latitude())<1e-6);
-        QVERIFY(std::abs((last3.longitude()-last1.longitude())-0.0004736)<1e-6);
+        QVERIFY(std::abs(std::abs(last3.longitude()-last1.longitude())-0.0004736)<1e-6);
     }
     void missionFilteringAndFlyPaths() {
         VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[2]; link.toggle();
@@ -335,7 +394,7 @@ private slots:
         const auto second=paths[1].toMap().value("path").toList();
         QVERIFY(first.size()>=2); QVERIFY(second.size()>=3);
         const auto endA=first.last().toMap(),endB=second.last().toMap();
-        QVERIFY(std::abs((endB.value("longitude").toDouble()-endA.value("longitude").toDouble())-0.00025)<0.000001);
+        QVERIFY(std::abs(std::abs(endB.value("longitude").toDouble()-endA.value("longitude").toDouble())-0.00025)<0.000001);
         QCOMPARE(endA.value("altitude").toDouble(),endB.value("altitude").toDouble());
         link.addPlanWaypoint(39.002,-86.002);
         QVERIFY2(link.planValid(),qPrintable(link.planStatus()));

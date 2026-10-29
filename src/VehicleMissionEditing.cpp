@@ -223,6 +223,6 @@ bool VehicleLink::recoverGeneratedPlan() {
     const double separation=spacing-(oldGeometry ? 1 : 3);
     if (separation>=0.3 && separation<=1000) m_minimumSeparation=separation;
     m_planPoints=points; m_pointSequences=sequences; m_planRtl=rtl; m_planValid=true;
-    m_planGeometryVersion=oldGeometry ? 1 : 2;
+    m_planGeometryVersion=oldGeometry ? 1 : 3;
     return true;
 }
