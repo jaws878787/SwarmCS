@@ -1,5 +1,6 @@
 #include <QtTest>
 #include "VehicleLink.h"
+#include "ParameterMetadata.h"
 #include <QAbstractItemModelTester>
 #include <QTemporaryDir>
 #include <cmath>
@@ -51,6 +52,96 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void parameterHelp() {
+        const auto copter = parameterMetadata("copter","ATC_RAT_PIT_P");
+        QCOMPARE(copter.value("units").toString(),QString("s/rad"));
+        QVERIFY(copter.value("description").toString().contains("Pitch"));
+        QVERIFY(copter.value("range").toString().contains("0.50"));
+        const auto px4 = parameterMetadata("px4","MPC_XY_CRUISE");
+        QCOMPARE(px4.value("units").toString(),QString("m/s"));
+        QVERIFY(!px4.value("summary").toString().isEmpty());
+        QCOMPARE(parameterMetadata("copter","UNKNOWN_PARAMETER").value("range").toString(),QString("Not specified"));
+    }
+    void takeoffSettings() {
+        const auto file = settingsFile();
+        {
+            VehicleLink link(nullptr,file,0);
+            QCOMPARE(link.takeoffUnit(),QString("ft"));
+            QCOMPARE(link.takeoffAltitude(),50.0);
+            link.toggleTakeoffUnit();
+            QVERIFY(std::abs(link.takeoffAltitude()-15.24) < 1e-9);
+            link.setTakeoffAltitude(20.5);
+        }
+        VehicleLink reopened(nullptr,file,0);
+        QCOMPARE(reopened.takeoffUnit(),QString("m"));
+        QCOMPARE(reopened.takeoffAltitude(),20.5);
+        reopened.setTakeoffAltitude(-1);
+        QCOMPARE(reopened.takeoffAltitude(),20.5);
+        reopened.toggleTakeoffUnit();
+        QVERIFY(std::abs(reopened.takeoffAltitude()*0.3048-20.5) < 1e-9);
+    }
+    void takeoffCommands() {
+        VehicleLink link(nullptr,settingsFile(),0);
+        QUdpSocket copter, px4;
+        QVERIFY(copter.bind(QHostAddress::LocalHost,0));
+        QVERIFY(px4.bind(QHostAddress::LocalHost,0));
+        link.toggle();
+        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,false);
+        heartbeat(px4,link,2,MAV_AUTOPILOT_PX4,1u<<16,true);
+        QTRY_COMPARE(link.count(),2);
+        readCommands(copter); readCommands(px4);
+        QVERIFY(!link.takeoff(1));
+        QVERIFY(!link.takeoff(2)); // PX4 requires a fresh AMSL reference.
+        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,true);
+        QTRY_VERIFY(link.vehicleDetails(1).value("armed").toBool());
+        QVERIFY(link.takeoff(1));
+        auto commands = readCommands(copter);
+        QCOMPARE(commands.size(),1);
+        QCOMPARE(commands.first().command,quint16(MAV_CMD_DO_SET_MODE));
+        QCOMPARE(commands.first().param2,4.0f);
+        link.setTakeoffAltitude(100); // Queued takeoff retains the altitude captured on click.
+        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,4,true);
+        QTRY_VERIFY(copter.hasPendingDatagrams());
+        bool found = false;
+        while (copter.hasPendingDatagrams()) {
+            const auto bytes = copter.receiveDatagram().data();
+            mavlink_message_t message{}, buffer{};
+            mavlink_status_t parser{}, status{};
+            for (auto byte : bytes) {
+                if (mavlink_frame_char_buffer(&buffer,&parser,quint8(byte),&message,&status) != MAVLINK_FRAMING_OK
+                    || message.msgid != MAVLINK_MSG_ID_COMMAND_INT) continue;
+                mavlink_command_int_t command{};
+                mavlink_msg_command_int_decode(&message,&command);
+                QCOMPARE(command.command,quint16(MAV_CMD_NAV_TAKEOFF));
+                QCOMPARE(command.frame,quint8(MAV_FRAME_GLOBAL_RELATIVE_ALT));
+                QVERIFY(std::abs(command.z-15.24f) < 0.001f);
+                found = true;
+            }
+        }
+        QVERIFY(found);
+        acknowledge(copter,link,1,MAV_CMD_NAV_TAKEOFF,MAV_RESULT_ACCEPTED);
+        mavlink_message_t position{};
+        mavlink_global_position_int_t data{};
+        data.lat = 390000000; data.lon = -860000000; data.alt = 200000; data.relative_alt = 15240;
+        mavlink_msg_global_position_int_encode(1,MAV_COMP_ID_AUTOPILOT1,&position,&data);
+        sendPacket(copter,link,position);
+        QTRY_VERIFY(!link.vehicleDetails(1).value("commandPending").toBool());
+        data.relative_alt = 10000;
+        mavlink_msg_global_position_int_encode(2,MAV_COMP_ID_AUTOPILOT1,&position,&data);
+        sendPacket(px4,link,position);
+        QTRY_VERIFY(link.vehicleDetails(2).value("positionValid").toBool());
+        QVERIFY(link.takeoff(2));
+        commands = readCommands(px4);
+        QCOMPARE(commands.size(),1);
+        QCOMPARE(commands.first().command,quint16(MAV_CMD_NAV_TAKEOFF));
+        QVERIFY(std::abs(commands.first().param7-220.48f) < 0.001f);
+        QVERIFY(std::isnan(commands.first().param5));
+        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,3,true);
+        QTRY_COMPARE(link.vehicleDetails(1).value("customMode").toUInt(),3u);
+        readCommands(copter);
+        QVERIFY(!link.takeoff(1));
+        QVERIFY(readCommands(copter).isEmpty()); // Mission altitude and execution remain untouched.
+    }
     void groupCommands() {
         VehicleLink link(nullptr, settingsFile(), 0);
         QUdpSocket copter, px4;

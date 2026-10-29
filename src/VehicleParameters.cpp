@@ -1,4 +1,5 @@
 #include "VehicleLink.h"
+#include "ParameterMetadata.h"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -76,8 +77,12 @@ QVariantList VehicleLink::parameters(int systemId, const QString &search) const 
     const auto &peer = m_peers[row];
     for (auto it = peer.parameters.cbegin(); it != peer.parameters.cend(); ++it) {
         if (!it.key().contains(search.trimmed(),Qt::CaseInsensitive)) continue;
-        result.append(QVariantMap{{"name",it.key()}, {"value",QString::number(it->value,'g',10)},
-            {"type",it->type}, {"editable",supported(it->type) && std::isfinite(it->value)}});
+        auto item = parameterMetadata(peer.autopilot == MAV_AUTOPILOT_PX4 ? "px4" : isPlane(peer) ? "plane" : "copter",it.key());
+        item.insert("name",it.key());
+        item.insert("value",QString::number(it->value,'g',10));
+        item.insert("type",it->type);
+        item.insert("editable",supported(it->type) && std::isfinite(it->value));
+        result.append(item);
     }
     return result;
 }

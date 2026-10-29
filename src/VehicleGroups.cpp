@@ -54,6 +54,7 @@ void VehicleLink::groupAction(const QString &group, const QString &action, const
         auto &peer = m_peers[rowForSystem(id)];
         bool success = false;
         if (action == "arm" || action == "disarm") success = setArmed(id, action == "arm");
+        else if (action == "takeoff") success = takeoff(id);
         else if (action == "mode" || action == "rtl") {
             const auto requested = action == "rtl" ? QString("rtl") : modeKey(mode);
             for (const auto &entry : availableModes(id)) {
@@ -78,7 +79,7 @@ void VehicleLink::groupAction(const QString &group, const QString &action, const
     }
     QString report = QString("%1 vehicle request(s) submitted. Results are confirmed by vehicle telemetry or command acknowledgement.").arg(sent);
     if (!skipped.isEmpty()) report += "\n\nSkipped: " + skipped.join(", ")
-        + ". A vehicle may be busy or its mode unavailable. Mission start requires the vehicle to be armed.";
+        + ". A vehicle may be busy or its mode unavailable. Takeoff preserves mission-mode vehicles and their mission altitude. Takeoff and mission start require the vehicle to be armed.";
     if (vehicles.isEmpty()) report = "There are no connected vehicles in this group.";
     emit operationReport("Group · " + group, report);
 }

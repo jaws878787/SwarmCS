@@ -22,6 +22,9 @@ VehicleLink::VehicleLink(QObject *parent, const QString &settingsFile, quint16 p
       m_settings(settingsFile.isEmpty() ? std::make_unique<QSettings>()
           : std::make_unique<QSettings>(settingsFile, QSettings::IniFormat)), m_port(port) {
     m_resolvedNames = resolvedNames();
+    const double savedAltitude = m_settings->value("takeoff/altitudeMeters",15.24).toDouble();
+    if (std::isfinite(savedAltitude) && savedAltitude > 0 && savedAltitude <= 10000) m_takeoffMeters = savedAltitude;
+    m_takeoffUnit = m_settings->value("takeoff/unit","ft").toString() == "m" ? "m" : "ft";
     m_velocityUnit = m_settings->value("display/velocityUnit", "kph").toString() == "mph" ? "mph" : "kph";
     m_groups = {"Ungrouped"};
     for (const auto &group : m_settings->value("vehicleGroups/list").toStringList())
@@ -280,6 +283,7 @@ bool VehicleLink::setFlightMode(int systemId, quint32 mode, int standardMode) {
 
 void VehicleLink::finishCommand(Peer &peer, const QString &message) {
     peer.pendingCommand = 0;
+    peer.queuedTakeoff = std::numeric_limits<double>::quiet_NaN();
     peer.commandStatus = message;
     const int row = rowForSystem(peer.systemId);
     emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
@@ -291,7 +295,15 @@ void VehicleLink::confirmState(Peer &peer) {
         finishCommand(peer,peer.armed ? "Armed." : "Disarmed.");
     else if ((peer.pendingCommand == MAV_CMD_DO_SET_MODE && peer.customMode == peer.desiredMode)
         || (peer.pendingCommand == MAV_CMD_DO_SET_STANDARD_MODE && peer.standardMode == peer.desiredStandardMode))
+    {
+        const double queued = peer.queuedTakeoff;
         finishCommand(peer,"Flight mode changed to " + peer.flightMode + ".");
+        if (std::isfinite(queued) && !sendTakeoff(peer,queued))
+            emit notice(nameForSystem(peer.systemId) + ": takeoff cancelled; vehicle state no longer permits it.");
+    }
+    else if (peer.pendingCommand == MAV_CMD_NAV_TAKEOFF && peer.armed && peer.altitudeTime >= 0
+        && m_clock.elapsed() - peer.altitudeTime <= 5000 && peer.altitude >= peer.takeoffTarget - 0.5)
+        finishCommand(peer,"Takeoff altitude reached.");
 }
 
 QString VehicleLink::groupForSystem(int systemId) const {
@@ -442,6 +454,10 @@ void VehicleLink::receive() {
                             .arg((version.flight_sw_version >> 8) & 0xff);
                         emit dataChanged(index(row), index(row), {FirmwareRole});
                     }
+                } else if (message.msgid == MAVLINK_MSG_ID_HOME_POSITION) {
+                    mavlink_home_position_t home{};
+                    mavlink_msg_home_position_decode(&message,&home);
+                    peer.homeAltitude = home.altitude / 1000.0;
                 } else if (message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {
                     mavlink_global_position_int_t position{};
                     mavlink_msg_global_position_int_decode(&message, &position);
@@ -453,9 +469,11 @@ void VehicleLink::receive() {
                     }
                     if (position.hdg != UINT16_MAX) peer.heading = position.hdg / 100.0;
                     peer.altitude = position.relative_alt / 1000.0;
+                    peer.homeAltitude = (double(position.alt) - double(position.relative_alt)) / 1000.0;
                     peer.altitudeTime = m_clock.elapsed();
                     peer.velocity = std::hypot(double(position.vx), double(position.vy)) / 100.0;
                     peer.velocityTime = m_clock.elapsed();
+                    confirmState(peer);
                     emit dataChanged(index(row),index(row),{AltitudeRole,VelocityRole,LatitudeRole,LongitudeRole,HeadingRole,PositionValidRole});
                 } else if (message.msgid == MAVLINK_MSG_ID_VFR_HUD) {
                     mavlink_vfr_hud_t hud{};
@@ -478,6 +496,7 @@ void VehicleLink::receive() {
                         }
                         peer.commandStatus = ack.result == MAV_RESULT_ACCEPTED
                             ? "Accepted; waiting for vehicle state…" : "Vehicle request in progress…";
+                        if (ack.command == MAV_CMD_NAV_TAKEOFF) peer.commandDeadline = m_clock.elapsed() + 60000;
                         if (ack.result == MAV_RESULT_IN_PROGRESS) peer.commandDeadline = m_clock.elapsed() + 15000;
                         emit dataChanged(index(row),index(row),{CommandStatusRole});
                         if (peer.pendingCommand == MAV_CMD_DO_SET_STANDARD_MODE)

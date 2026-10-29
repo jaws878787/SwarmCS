@@ -90,7 +90,7 @@ ApplicationWindow {
             anchors.fill: parent
             anchors.leftMargin: 22
             anchors.rightMargin: 16
-            spacing: 20
+            spacing: 12
             Label { text: "SWARMCS"; color: "#f2f6f8"; font.pixelSize: 19; font.bold: true; font.letterSpacing: 2 }
             Rectangle { width: 1; height: 24; color: "#34414d" }
             Label {
@@ -99,6 +99,37 @@ ApplicationWindow {
                 font.pixelSize: 13
                 elide: Text.ElideRight
                 Layout.fillWidth: true
+            }
+            RowLayout {
+                spacing: 5
+                Label { text: "Takeoff altitude"; font.pixelSize: 11 }
+                TextField {
+                    id: takeoffAltitudeField
+                    Layout.preferredWidth: 75
+                    implicitHeight: 34
+                    Component.onCompleted: text = Number(vehicleLink.takeoffAltitude.toFixed(2)).toString()
+                    Connections {
+                        target: vehicleLink
+                        function onTakeoffSettingsChanged() {
+                            if (!takeoffAltitudeField.activeFocus) takeoffAltitudeField.text = Number(vehicleLink.takeoffAltitude.toFixed(2)).toString()
+                        }
+                    }
+                    selectByMouse: true
+                    horizontalAlignment: Text.AlignHCenter
+                    Accessible.name: "Takeoff altitude"
+                    validator: DoubleValidator { bottom: 0.01; top: vehicleLink.takeoffUnit === "ft" ? 32808.39 : 10000; decimals: 2; notation: DoubleValidator.StandardNotation; locale: "en_US" }
+                    onTextEdited: { if (acceptableInput) vehicleLink.setTakeoffAltitude(Number(text)) }
+                    onEditingFinished: text = Number(vehicleLink.takeoffAltitude.toFixed(2)).toString()
+                }
+                ToolButton {
+                    text: vehicleLink.takeoffUnit
+                    implicitWidth: 34
+                    implicitHeight: 34
+                    Accessible.name: "Takeoff altitude units, " + text + "; click to change"
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Click to switch feet / meters"
+                    onClicked: vehicleLink.toggleTakeoffUnit()
+                }
             }
             ToolButton {
                 text: "\u2699"

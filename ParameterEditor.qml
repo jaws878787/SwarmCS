@@ -6,7 +6,7 @@ Dialog {
     id: editor
     parent: Overlay.overlay
     anchors.centerIn: parent
-    width: Math.min(780, parent.width - 32)
+    width: Math.min(1080, parent.width - 32)
     height: Math.min(700, parent.height - 48)
     modal: true
     title: "Parameters · " + groupName
@@ -18,6 +18,10 @@ Dialog {
     property var drafts: ({})
     property string statusText: ""
     property bool ready: false
+    readonly property int nameWidth: width < 850 ? 130 : 165
+    readonly property int unitWidth: width < 850 ? 45 : 65
+    readonly property int rangeWidth: width < 850 ? 100 : 155
+    readonly property int valueWidth: width < 850 ? 100 : 130
     property bool saving: vehicleLink.parameterSaveBusy
     property int editCount: Object.keys(drafts[systemId] || {}).length
     function refresh(rebuild) {
@@ -115,8 +119,13 @@ Dialog {
         }
         RowLayout {
             Layout.fillWidth: true
-            Label { text: "Parameter"; font.bold: true; Layout.fillWidth: true }
-            Label { text: "Value"; font.bold: true; Layout.preferredWidth: 190 }
+            Layout.leftMargin: 8
+            Layout.rightMargin: 14
+            Label { text: "Parameter"; font.bold: true; Layout.preferredWidth: editor.nameWidth }
+            Label { text: "Description"; font.bold: true; Layout.fillWidth: true }
+            Label { text: "Units"; font.bold: true; Layout.preferredWidth: editor.unitWidth }
+            Label { text: "Valid range*"; font.bold: true; Layout.preferredWidth: editor.rangeWidth }
+            Label { text: "Value"; font.bold: true; Layout.preferredWidth: editor.valueWidth }
         }
         ListView {
             id: parameterList
@@ -141,10 +150,24 @@ Dialog {
                         textFormat: Text.PlainText
                         font.pixelSize: 12
                         elide: Text.ElideRight
-                        Layout.fillWidth: true
+                        Layout.preferredWidth: editor.nameWidth
+                        HoverHandler { id: nameHover }
+                        ToolTip {
+                            id: parameterTip
+                            visible: nameHover.hovered
+                            delay: 500
+                            timeout: -1
+                            width: Math.min(500, editor.width - 32)
+                            text: modelData.help
+                            background: Rectangle { color: "#203743"; border.color: "#557584"; radius: 5 }
+                            contentItem: Label { text: parameterTip.text; color: "#e5edf3"; textFormat: Text.PlainText; wrapMode: Text.WordWrap; font.pixelSize: 12 }
+                        }
                     }
+                    Label { text: modelData.summary; textFormat: Text.PlainText; font.pixelSize: 11; color: "#a8bac8"; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Label { text: modelData.units; textFormat: Text.PlainText; font.pixelSize: 11; elide: Text.ElideRight; Layout.preferredWidth: editor.unitWidth }
+                    Label { text: modelData.range; textFormat: Text.PlainText; font.pixelSize: 11; elide: Text.ElideRight; Layout.preferredWidth: editor.rangeWidth }
                     TextField {
-                        Layout.preferredWidth: 190
+                        Layout.preferredWidth: editor.valueWidth
                         Layout.fillHeight: true
                         text: editor.draftValue(modelData.name, modelData.value)
                         enabled: editor.ready && !editor.saving && modelData.editable
@@ -156,6 +179,13 @@ Dialog {
                 }
             }
             Label { anchors.centerIn: parent; visible: parameterList.count === 0; text: editor.ready ? "No matching parameters" : "Waiting for parameters…"; color: "#91a9b9" }
+        }
+        Label {
+            text: "* Firmware reference ranges; variants may differ. Hover a parameter name for details and listed values."
+            color: "#91a9b9"
+            font.pixelSize: 11
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
         }
         Label {
             text: editor.editCount + " pending change(s) for this vehicle. Edits are sent only when you save."

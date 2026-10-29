@@ -134,6 +134,7 @@ Rectangle {
         popupType: Popup.Item
         MenuItem { text: "Arm all vehicles"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "arm") }
         MenuItem { text: "Disarm all vehicles"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "disarm") }
+        MenuItem { text: "Takeoff"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "takeoff") }
         MenuSeparator {}
         MenuItem { text: "Start missions"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "mission") }
         MenuItem { text: "RTL"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "rtl") }
@@ -205,6 +206,11 @@ Rectangle {
             text: tree.selectedVehicle.armed ? "Disarm" : "Arm"
             enabled: tree.selectedVehicle.connected === true && !tree.selectedVehicle.commandPending
             onTriggered: vehicleLink.setArmed(tree.selectedSystemId, !tree.selectedVehicle.armed)
+        }
+        MenuItem {
+            text: "Takeoff"
+            enabled: tree.selectedVehicle.connected === true && !tree.selectedVehicle.commandPending
+            onTriggered: vehicleLink.takeoff(tree.selectedSystemId)
         }
         Menu {
             id: groupMenu
