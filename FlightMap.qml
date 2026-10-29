@@ -29,6 +29,44 @@ Map {
     }
     onMapReadyChanged: { if (mapReady && pendingGroupFit.length > 0) frameGroup(pendingGroupFit) }
     MapItemView {
+        model: vehicleLink.navigationCenters
+        delegate: MapQuickItem {
+            required property var modelData
+            coordinate: QtPositioning.coordinate(modelData.latitude,modelData.longitude)
+            anchorPoint.x: 12; anchorPoint.y: 12
+            sourceItem: Item {
+                width: 24; height: 24
+                Rectangle { anchors.fill: parent; radius: 12; color: "#d9101820"; border.color: "#ffca82"; border.width: 2 }
+                Label { anchors.centerIn: parent; text: "+"; color: "#ffca82"; font.pixelSize: 20 }
+                Label { x: 28; y: 3; text: "Go Here"; color: "#ffca82"; font.pixelSize: 12 }
+            }
+        }
+    }
+    MapItemView {
+        model: vehicleLink.navigationTargets
+        delegate: MapPolyline {
+            required property var modelData
+            line.width: 2
+            line.color: "#ffca82"
+            path: [QtPositioning.coordinate(modelData.fromLatitude,modelData.fromLongitude),
+                   QtPositioning.coordinate(modelData.latitude,modelData.longitude)]
+        }
+    }
+    MapItemView {
+        model: vehicleLink.navigationTargets
+        delegate: MapQuickItem {
+            required property var modelData
+            coordinate: QtPositioning.coordinate(modelData.latitude,modelData.longitude)
+            anchorPoint.x: 8
+            anchorPoint.y: 8
+            sourceItem: Item {
+                width: 16; height: 16
+                Rectangle { anchors.fill: parent; rotation: 45; color: "#b3101820"; border.color: "#ffca82"; border.width: 2 }
+                Label { x: 20; y: -2; text: modelData.name + " destination"; textFormat: Text.PlainText; color: "#ffca82"; font.pixelSize: 11 }
+            }
+        }
+    }
+    MapItemView {
         model: vehicleLink
         delegate: MapQuickItem {
             id: marker

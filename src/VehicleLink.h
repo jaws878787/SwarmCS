@@ -25,6 +25,8 @@ class VehicleLink final : public QAbstractListModel {
     Q_PROPERTY(QString takeoffUnit READ takeoffUnit NOTIFY takeoffSettingsChanged)
     Q_PROPERTY(int selectedSystemId READ selectedSystemId NOTIFY selectionChanged)
     Q_PROPERTY(QString selectedGroup READ selectedGroup NOTIFY selectionChanged)
+    Q_PROPERTY(QVariantList navigationTargets READ navigationTargets NOTIFY navigationChanged)
+    Q_PROPERTY(QVariantList navigationCenters READ navigationCenters NOTIFY navigationChanged)
 public:
     enum Role { SystemIdRole = Qt::UserRole + 1, VehicleNameRole, FirmwareRole,
                 ArmedRole, FlightModeRole, AltitudeRole, VelocityRole, VehicleGroupRole,
@@ -77,6 +79,8 @@ public:
     Q_INVOKABLE void selectGroup(const QString &group);
     int selectedSystemId() const { return m_selectedSystemId; }
     QString selectedGroup() const { return m_selectedGroup; }
+    QVariantList navigationTargets() const;
+    QVariantList navigationCenters() const;
 signals:
     void changed();
     void groupsChanged();
@@ -90,6 +94,7 @@ signals:
     void takeoffSettingsChanged();
     void selectionChanged();
     void groupCenterRequested(const QString &group);
+    void navigationChanged();
 private:
     struct Parameter { double value = 0; quint8 type = 0; int index = -1; };
     struct Peer {
@@ -170,6 +175,10 @@ private:
     void receive();
     void tick();
     void updateStatus();
+    void clearNavigation(int systemId);
+    void updateNavigation();
+    struct NavigationTarget { double latitude; double longitude; double altitude; double centerLatitude; double centerLongitude; };
+    QMap<int, NavigationTarget> m_navigationTargets;
     bool sendTakeoff(Peer &peer, double altitude);
     bool advanceTakeoff(Peer &peer, double altitude);
     void parameterTick();

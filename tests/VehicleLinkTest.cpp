@@ -311,7 +311,8 @@ private slots:
                     mavlink_command_int_t command{};
                     mavlink_msg_command_int_decode(&message,&command);
                     QCOMPARE(command.command,quint16(MAV_CMD_DO_REPOSITION));
-                    QCOMPARE(command.x,395000000); QCOMPARE(command.y,-865000000);
+                    QVERIFY(std::abs(command.x - (socket == &copter ? 394999500 : 395000500)) < 5);
+                    QVERIFY(std::abs(command.y + 865000000) < 5);
                     QCOMPARE(command.param2,float(MAV_DO_REPOSITION_FLAGS_CHANGE_MODE));
                     QCOMPARE(command.frame,quint8(socket == &copter ? MAV_FRAME_GLOBAL_RELATIVE_ALT : MAV_FRAME_GLOBAL));
                     QCOMPARE(command.z,socket == &copter ? 10.0f : 225.0f);
@@ -321,11 +322,49 @@ private slots:
             QVERIFY(found);
         }
         QVERIFY(!link.goTo(1,std::numeric_limits<double>::quiet_NaN(),0));
+        QCOMPARE(link.navigationTargets().size(),2);
+        QCOMPARE(link.navigationCenters().size(),1);
+        QCOMPARE(link.navigationCenters().first().toMap().value("latitude").toDouble(),39.5);
+        acknowledge(copter,link,1,MAV_CMD_DO_REPOSITION,MAV_RESULT_ACCEPTED);
+        QTRY_VERIFY(!link.vehicleDetails(1).value("commandPending").toBool());
+        QCOMPARE(link.navigationTargets().size(),2); // Acceptance does not mean arrival.
+        const auto target = link.navigationTargets().first().toMap();
+        mavlink_message_t arrival{};
+        mavlink_global_position_int_t position{};
+        position.lat = qint32(std::llround(target.value("latitude").toDouble()*1e7));
+        position.lon = qint32(std::llround(target.value("longitude").toDouble()*1e7));
+        position.relative_alt = 10000; position.alt = 210000;
+        mavlink_msg_global_position_int_encode(1,MAV_COMP_ID_AUTOPILOT1,&arrival,&position);
+        sendPacket(copter,link,arrival);
+        QTRY_COMPARE(link.navigationTargets().size(),1);
+        QCOMPARE(link.navigationTargets().first().toMap().value("systemId").toInt(),2);
         link.groupAction("Ungrouped","land");
+        QVERIFY(link.navigationTargets().isEmpty());
         auto commands = readCommands(copter);
         QCOMPARE(commands.size(),1); QCOMPARE(commands.first().param2,9.0f);
         commands = readCommands(px4);
         QCOMPARE(commands.size(),1); QCOMPARE(commands.first().param2,4.0f); QCOMPARE(commands.first().param3,6.0f);
+    }
+    void rejectedNavigationClearsDestination() {
+        VehicleLink link(nullptr,settingsFile(),0);
+        QUdpSocket vehicle;
+        QVERIFY(vehicle.bind(QHostAddress::LocalHost,0));
+        link.toggle();
+        heartbeat(vehicle,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,4,true);
+        QTRY_COMPARE(link.count(),1);
+        mavlink_message_t message{};
+        mavlink_global_position_int_t position{};
+        position.lat = 390000000; position.lon = 1799999000; position.relative_alt = 10000;
+        mavlink_msg_global_position_int_encode(1,MAV_COMP_ID_AUTOPILOT1,&message,&position);
+        sendPacket(vehicle,link,message);
+        QTRY_VERIFY(link.vehicleDetails(1).value("positionValid").toBool());
+        QVERIFY(link.goTo(1,39,-179.9999));
+        QCOMPARE(link.navigationTargets().size(),1);
+        acknowledge(vehicle,link,1,MAV_CMD_DO_REPOSITION,MAV_RESULT_DENIED);
+        QTRY_VERIFY(link.navigationTargets().isEmpty());
+        QVERIFY(link.goTo(1,39,-179.9999));
+        link.toggle();
+        QVERIFY(link.navigationTargets().isEmpty());
     }
     void groupCommands() {
         VehicleLink link(nullptr, settingsFile(), 0);

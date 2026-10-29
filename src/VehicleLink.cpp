@@ -295,6 +295,7 @@ void VehicleLink::finishCommand(Peer &peer, const QString &message, bool error) 
     const int row = rowForSystem(peer.systemId);
     emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
     if (error) {
+        if (command == MAV_CMD_DO_REPOSITION) clearNavigation(peer.systemId);
         if (command == MAV_CMD_COMPONENT_ARM_DISARM && peer.preArmError && m_clock.elapsed() - peer.errorTime < 10000)
             emit notice(nameForSystem(peer.systemId) + ": pre-arm check failed.");
         else failVehicle(peer,message);
@@ -447,6 +448,8 @@ void VehicleLink::toggle() {
         m_socket.close();
         beginResetModel();
         m_peers.clear();
+        m_navigationTargets.clear();
+        emit navigationChanged();
         m_selectedSystemId = 0;
         m_selectedGroup.clear();
         emit selectionChanged();
@@ -689,7 +692,14 @@ void VehicleLink::receive() {
 bool VehicleLink::send(const mavlink_message_t &message, const Peer &peer) {
     uint8_t bytes[MAVLINK_MAX_PACKET_LEN];
     const auto length = mavlink_msg_to_send_buffer(bytes, &message);
-    return m_socket.writeDatagram(reinterpret_cast<const char *>(bytes), length, peer.address, peer.port) == length;
+    const bool sent = m_socket.writeDatagram(reinterpret_cast<const char *>(bytes), length, peer.address, peer.port) == length;
+    quint16 command = 0;
+    if (message.msgid == MAVLINK_MSG_ID_COMMAND_LONG) command = mavlink_msg_command_long_get_command(&message);
+    else if (message.msgid == MAVLINK_MSG_ID_COMMAND_INT) command = mavlink_msg_command_int_get_command(&message);
+    if (sent && (command == MAV_CMD_COMPONENT_ARM_DISARM || command == MAV_CMD_DO_SET_MODE
+        || command == MAV_CMD_DO_SET_STANDARD_MODE || command == MAV_CMD_NAV_TAKEOFF
+        || command == MAV_CMD_MISSION_START || command == MAV_CMD_DO_REPOSITION)) clearNavigation(peer.systemId);
+    return sent;
 }
 
 void VehicleLink::requestTelemetry(const Peer &peer) {
@@ -734,6 +744,7 @@ void VehicleLink::tick() {
         emit groupsChanged();
         emit changed();
     }
+    updateNavigation();
     updateStatus();
 }
 

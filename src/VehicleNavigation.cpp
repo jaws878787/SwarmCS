@@ -1,5 +1,52 @@
 #include "VehicleLink.h"
 #include <cmath>
+#include <QGeoCoordinate>
+
+QVariantList VehicleLink::navigationTargets() const {
+    QVariantList result;
+    for (auto it = m_navigationTargets.cbegin(); it != m_navigationTargets.cend(); ++it) {
+        const int row = rowForSystem(it.key());
+        if (row < 0 || !positionValid(m_peers[row])) continue;
+        const auto &peer = m_peers[row];
+        result.append(QVariantMap{{"systemId",it.key()},{"name",nameForSystem(it.key())},
+            {"latitude",it->latitude},{"longitude",it->longitude},
+            {"fromLatitude",peer.latitude},{"fromLongitude",peer.longitude}});
+    }
+    return result;
+}
+
+void VehicleLink::clearNavigation(int systemId) {
+    if (m_navigationTargets.remove(systemId)) emit navigationChanged();
+}
+
+QVariantList VehicleLink::navigationCenters() const {
+    QVariantList result;
+    QSet<QString> seen;
+    for (const auto &target : m_navigationTargets) {
+        const auto key = QString::number(target.centerLatitude,'f',7) + "," + QString::number(target.centerLongitude,'f',7);
+        if (seen.contains(key)) continue;
+        seen.insert(key);
+        result.append(QVariantMap{{"latitude",target.centerLatitude},{"longitude",target.centerLongitude}});
+    }
+    return result;
+}
+
+void VehicleLink::updateNavigation() {
+    if (m_navigationTargets.isEmpty()) return;
+    for (auto it = m_navigationTargets.begin(); it != m_navigationTargets.end();) {
+        const int row = rowForSystem(it.key());
+        bool done = row < 0;
+        if (!done) {
+            const auto &peer = m_peers[row];
+            done = !peer.armed || (positionValid(peer) && peer.altitudeTime >= 0
+                && m_clock.elapsed() - peer.altitudeTime < 5000
+                && QGeoCoordinate(peer.latitude,peer.longitude).distanceTo(QGeoCoordinate(it->latitude,it->longitude)) <= 2.0
+                && std::abs(peer.altitude - it->altitude) <= 2.0);
+        }
+        if (done) it = m_navigationTargets.erase(it); else ++it;
+    }
+    emit navigationChanged();
+}
 
 void VehicleLink::selectGroup(const QString &group) {
     if (!m_groups.contains(group)) return;
@@ -55,6 +102,8 @@ bool VehicleLink::goTo(int systemId, double latitude, double longitude) {
         std::numeric_limits<float>::quiet_NaN(),qint32(std::llround(latitude * 1e7)),qint32(std::llround(longitude * 1e7)),
         float(peer.altitude + (px4 ? peer.homeAltitude : 0)));
     if (!send(message,peer)) return failVehicle(peer,"Go Here not sent.");
+    m_navigationTargets.insert(systemId,{latitude,longitude,peer.altitude,latitude,longitude});
+    emit navigationChanged();
     peer.pendingCommand = MAV_CMD_DO_REPOSITION;
     peer.commandDeadline = m_clock.elapsed() + 10000;
     peer.commandStatus = "Going to location…";
@@ -65,8 +114,35 @@ bool VehicleLink::goTo(int systemId, double latitude, double longitude) {
 
 void VehicleLink::goToGroup(const QString &group, double latitude, double longitude) {
     const auto vehicles = groupVehicles(group);
+    const QGeoCoordinate destination(latitude,longitude);
+    if (!destination.isValid()) { emit notice("Go Here: invalid location."); return; }
+    // Spherical centroid avoids longitude wraparound at the date line.
+    QList<int> members;
+    double x = 0, y = 0, z = 0;
+    constexpr double radians = 3.14159265358979323846 / 180.0;
+    for (const auto &entry : vehicles) {
+        const int id = entry.toMap().value("systemId").toInt();
+        const auto &peer = m_peers[rowForSystem(id)];
+        if (isPlane(peer) || !peer.armed || !positionValid(peer) || peer.altitudeTime < 0
+            || m_clock.elapsed() - peer.altitudeTime > 5000 || !std::isfinite(peer.altitude) || peer.altitude < 0.5
+            || (peer.autopilot == MAV_AUTOPILOT_PX4 && !std::isfinite(peer.homeAltitude))) continue;
+        members.append(id);
+        x += std::cos(peer.latitude*radians)*std::cos(peer.longitude*radians);
+        y += std::cos(peer.latitude*radians)*std::sin(peer.longitude*radians);
+        z += std::sin(peer.latitude*radians);
+    }
+    const QGeoCoordinate center(std::atan2(z,std::hypot(x,y))/radians,std::atan2(y,x)/radians);
     int requested = 0;
-    for (const auto &entry : vehicles)
-        if (goTo(entry.toMap().value("systemId").toInt(),latitude,longitude)) ++requested;
+    for (const int id : members) {
+        const auto &peer = m_peers[rowForSystem(id)];
+        const QGeoCoordinate position(peer.latitude,peer.longitude);
+        const auto target = destination.atDistanceAndAzimuth(center.distanceTo(position),center.azimuthTo(position));
+        if (goTo(id,target.latitude(),target.longitude())) {
+            ++requested;
+            m_navigationTargets[id].centerLatitude = latitude;
+            m_navigationTargets[id].centerLongitude = longitude;
+        }
+    }
+    emit navigationChanged();
     emit notice(QString("%1 · Go Here: %2 requested, %3 skipped").arg(group).arg(requested).arg(vehicles.size() - requested));
 }
