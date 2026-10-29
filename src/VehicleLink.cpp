@@ -45,7 +45,7 @@ void VehicleLink::receive() {
                             && heartbeat.autopilot != MAV_AUTOPILOT_PX4)) continue;
             const auto key = datagram.senderAddress().toString() + ':'
                 + QString::number(datagram.senderPort()) + ':' + QString::number(message.sysid);
-            m_peers.insert(key, {datagram.senderAddress(), datagram.senderPort(), m_clock.elapsed(),
+            m_peers.insert(key, {datagram.senderAddress(), static_cast<quint16>(datagram.senderPort()), m_clock.elapsed(),
                 QString("%1 · Vehicle %2").arg(heartbeat.autopilot == MAV_AUTOPILOT_PX4 ? "PX4" : "ArduPilot")
                     .arg(message.sysid)});
         }

@@ -7,6 +7,7 @@ FetchContent_Declare(mavlink GIT_REPOSITORY https://github.com/mavlink/c_library
 FetchContent_MakeAvailable(mavlink)
 find_package(Qt6 6.8 REQUIRED COMPONENTS Quick QuickControls2 Network Location Positioning)
 qt_standard_project_setup(REQUIRES 6.8)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 qt_add_executable(SwarmCS src/main.cpp src/VehicleLink.cpp src/VehicleLink.h)
 target_include_directories(SwarmCS SYSTEM PRIVATE ${mavlink_SOURCE_DIR})
 target_link_libraries(SwarmCS PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Location Qt6::Positioning)

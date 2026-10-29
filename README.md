@@ -11,10 +11,12 @@ Install CMake 3.24+, a C++17 compiler, and Qt 6.8+ with Qt Quick, Quick Controls
 ```powershell
 cmake -S . -B build -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64"
 cmake --build build --config Debug
-./build/Debug/SwarmCS.exe
+./build/bin/Debug/SwarmCS.exe
 ```
 
-Use your installed Qt kit path. On single-configuration generators the executable is directly in `build/`. Deploy Qt libraries and QML plugins with your Qt kit's `windeployqt --qmldir . build/Debug/SwarmCS.exe` when running outside the Qt development environment.
+Use your installed Qt kit path and its matching compiler/runtime. On single-configuration generators the executable is directly in `build/bin/`. Deploy Qt libraries and QML plugins with your Qt kit's `windeployqt --qmldir . build/bin/Debug/SwarmCS.exe` when running outside the Qt development environment.
+
+Run the UDP integration tests with `ctest --test-dir build -C Debug --output-on-failure`. Port 14550 must be free.
 
 ## Try discovery
 
