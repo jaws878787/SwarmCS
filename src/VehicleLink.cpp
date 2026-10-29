@@ -446,6 +446,7 @@ void VehicleLink::toggle() {
         m_selection.clear();
         m_planActive=false;
         m_missionTransfers.clear();
+        m_flightMissions.clear();
         emit planChanged();
         emit selectionChanged();
         endResetModel();
@@ -511,12 +512,8 @@ void VehicleLink::receive() {
                     sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_HOME_POSITION);
                     sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_STATUSTEXT);
                     sendCommand(peer, MAV_CMD_RUN_PREARM_CHECKS);
-                    mavlink_message_t missionRequest{};
-                    mavlink_status_t missionStatus{};
-                    missionStatus.current_tx_seq = m_sequence++;
-                    mavlink_msg_mission_request_list_pack_status(255,MAV_COMP_ID_MISSIONPLANNER,&missionStatus,&missionRequest,
-                        peer.systemId,peer.componentId,MAV_MISSION_TYPE_MISSION);
-                    send(missionRequest,peer);
+                    m_flightMissions.remove(peer.systemId);
+                    if (!m_planActive) { m_missionTransfers.insert(peer.systemId,{}); sendMissionTransfer(peer.systemId); }
                     requestModes(peer);
                     structureChanged = true;
                 } else {
@@ -578,6 +575,7 @@ void VehicleLink::receive() {
                     peer.homeAltitude = home.altitude / 1000.0;
                     peer.homeLatitude = home.latitude / 1e7;
                     peer.homeLongitude = home.longitude / 1e7;
+                    if (m_flightMissions.contains(peer.systemId)) emit planChanged();
                 } else if (message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {
                     mavlink_global_position_int_t position{};
                     mavlink_msg_global_position_int_decode(&message, &position);

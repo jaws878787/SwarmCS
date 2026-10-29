@@ -29,7 +29,7 @@ Map {
     }
     onMapReadyChanged: { if (mapReady && pendingGroupFit.length > 0) frameGroup(pendingGroupFit) }
     MapItemView {
-        model: vehicleLink.planActive ? vehicleLink.planPaths : []
+        model: vehicleLink.planActive ? vehicleLink.planPaths : vehicleLink.flightPaths
         delegate: MapPolyline {
             required property var modelData
             line.width: 2; line.color: "#ffb360"
@@ -42,15 +42,15 @@ Map {
         path: vehicleLink.planCenterPath.map(p => QtPositioning.coordinate(p.latitude,p.longitude))
     }
     MapItemView {
-        model: vehicleLink.planActive ? vehicleLink.planCenterPath : []
+        model: vehicleLink.planActive ? vehicleLink.planMarkers : []
         delegate: MapQuickItem {
             required property var modelData
             required property int index
-            coordinate: QtPositioning.coordinate(modelData.latitude,modelData.longitude)
+            coordinate: map.draggedRow === modelData.row && map.editingWaypoint ? map.dragCoordinate : QtPositioning.coordinate(modelData.latitude,modelData.longitude)
             anchorPoint.x: 11; anchorPoint.y: 11
             sourceItem: Rectangle {
-                width: 22; height: 22; radius: 11; color: "#102a31"; border.color: "#31e4ee"; border.width: 2
-                Label { anchors.centerIn: parent; text: index===0 ? "T" : index; font.pixelSize: 11; color: "#31e4ee" }
+                width: 22; height: 22; radius: 11; color: vehicleLink.selectedPlanItem === modelData.row ? "#f4e3ac" : "#102a31"; border.color: "#31e4ee"; border.width: 2
+                Label { anchors.centerIn: parent; text: modelData.label; font.pixelSize: 11; color: vehicleLink.selectedPlanItem === modelData.row ? "#102a31" : "#31e4ee" }
             }
         }
     }
@@ -133,7 +133,55 @@ Map {
             }
         }
     }
+    property bool editingWaypoint: false
+    property int draggedRow: -1
+    property var dragCoordinate: QtPositioning.coordinate()
+    MouseArea {
+        anchors.fill: parent
+        enabled: vehicleLink.planActive && !vehicleLink.missionBusy
+        acceptedButtons: Qt.LeftButton
+        property point startPoint
+        property point previousPoint
+        property bool moved: false
+        property bool hitMarker: false
+        property bool canDrag: false
+        onPressed: function(mouse) {
+            map.forceActiveFocus()
+            startPoint=Qt.point(mouse.x,mouse.y); previousPoint=startPoint; moved=false; hitMarker=false; canDrag=false
+            map.draggedRow=-1
+            let distance=20
+            for (const marker of vehicleLink.planMarkers) {
+                const pixel=map.fromCoordinate(QtPositioning.coordinate(marker.latitude,marker.longitude),false)
+                const d=Math.hypot(pixel.x-mouse.x,pixel.y-mouse.y)
+                if (d<distance) { distance=d; map.draggedRow=marker.row; canDrag=marker.draggable; hitMarker=true }
+            }
+            if (hitMarker) vehicleLink.selectPlanItem(map.draggedRow)
+        }
+        onPositionChanged: function(mouse) {
+            if (!pressed) return
+            if (Math.hypot(mouse.x-startPoint.x,mouse.y-startPoint.y)>6) moved=true
+            if (moved && hitMarker && canDrag) {
+                map.editingWaypoint=true
+                map.dragCoordinate=map.toCoordinate(Qt.point(mouse.x,mouse.y),false)
+            } else if (moved && !hitMarker) {
+                map.viewState.autoCenterAllowed=false
+                map.pan(previousPoint.x-mouse.x,previousPoint.y-mouse.y)
+            }
+            previousPoint=Qt.point(mouse.x,mouse.y)
+        }
+        onReleased: function(mouse) {
+            if (map.editingWaypoint && map.dragCoordinate.isValid)
+                vehicleLink.movePlanWaypoint(map.draggedRow,map.dragCoordinate.latitude,map.dragCoordinate.longitude)
+            else if (!moved && !hitMarker) {
+                const coordinate=map.toCoordinate(Qt.point(mouse.x,mouse.y),false)
+                if (coordinate.isValid) vehicleLink.addPlanWaypoint(coordinate.latitude,coordinate.longitude)
+            }
+            map.editingWaypoint=false; map.draggedRow=-1
+        }
+        onCanceled: { map.editingWaypoint=false; map.draggedRow=-1 }
+    }
     TapHandler {
+        enabled: !vehicleLink.planActive
         acceptedButtons: Qt.LeftButton
         onTapped: function(eventPoint) {
             const coordinate = map.toCoordinate(eventPoint.position, false)
@@ -166,6 +214,7 @@ Map {
         }
     }
     DragHandler {
+        enabled: !vehicleLink.planActive
         target: null
         onActiveChanged: { if (active) map.viewState.autoCenterAllowed = false }
         onTranslationChanged: function(delta) { map.pan(-delta.x, -delta.y) }

@@ -14,6 +14,12 @@ ApplicationWindow {
     minimumHeight: 400
     title: "SwarmCS"
     color: "#101820"
+    Shortcut {
+        sequence: "Delete"
+        enabled: vehicleLink.planActive && vehicleLink.selectedPlanItem >= 0 && !vehicleLink.missionBusy
+                 && (!window.activeFocusItem || typeof window.activeFocusItem.cursorPosition === "undefined")
+        onActivated: vehicleLink.removePlanItem(vehicleLink.selectedPlanItem)
+    }
     property bool satellite: true
     property var mapCenter: QtPositioning.coordinate(39.7684, -86.1581)
     property real mapZoom: 21 - Math.max(1, Math.min(20, mapSettings.zoomStep))

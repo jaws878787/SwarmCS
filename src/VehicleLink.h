@@ -34,6 +34,10 @@ class VehicleLink final : public QAbstractListModel {
     Q_PROPERTY(QVariantList planItems READ planItems NOTIFY planChanged)
     Q_PROPERTY(QVariantList planPaths READ planPaths NOTIFY planChanged)
     Q_PROPERTY(QVariantList planCenterPath READ planCenterPath NOTIFY planChanged)
+    Q_PROPERTY(QVariantList flightPaths READ flightPaths NOTIFY planChanged)
+    Q_PROPERTY(QVariantList planMarkers READ planMarkers NOTIFY planChanged)
+    Q_PROPERTY(int planVehicleId READ planVehicleId WRITE setPlanVehicleId NOTIFY planChanged)
+    Q_PROPERTY(int selectedPlanItem READ selectedPlanItem NOTIFY planSelectionChanged)
     Q_PROPERTY(QString planStatus READ planStatus NOTIFY planChanged)
     Q_PROPERTY(bool planValid READ planValid NOTIFY planChanged)
     Q_PROPERTY(double minimumSeparation READ minimumSeparation WRITE setMinimumSeparation NOTIFY planChanged)
@@ -103,6 +107,14 @@ public:
     QVariantList planItems() const;
     QVariantList planPaths() const;
     QVariantList planCenterPath() const;
+    QVariantList flightPaths() const;
+    QVariantList planMarkers() const;
+    int planVehicleId() const { return m_planVehicleId; }
+    int selectedPlanItem() const { return m_selectedPlanItem; }
+    Q_INVOKABLE void setPlanVehicleId(int systemId);
+    Q_INVOKABLE void selectPlanItem(int row);
+    Q_INVOKABLE void movePlanWaypoint(int row, double latitude, double longitude);
+    Q_INVOKABLE void addPlanRtl();
     Q_INVOKABLE void togglePlan();
     Q_INVOKABLE void addPlanWaypoint(double latitude, double longitude);
     Q_INVOKABLE void editPlanItem(int row, double altitudeFeet, double speed);
@@ -125,6 +137,7 @@ signals:
     void groupCenterRequested(const QString &group);
     void navigationChanged();
     void planChanged();
+    void planSelectionChanged();
 private:
     struct Parameter { double value = 0; quint8 type = 0; int index = -1; };
     struct Peer {
@@ -285,4 +298,16 @@ private:
     bool receiveMission(Peer &peer, const mavlink_message_t &message);
     void missionTick();
     void finishMissionDownloads();
+    int m_planVehicleId = 0;
+    int m_selectedPlanItem = -1;
+    bool m_planRtl = false;
+    bool m_uploadingPlan = false;
+    QMap<int,QList<int>> m_pointSequences;
+    QMap<int,QList<mavlink_mission_item_int_t>> m_flightMissions;
+    QVariantList missionPaths(const QMap<int,QList<mavlink_mission_item_int_t>> &missions, bool planning) const;
+    QString missionPlanKey() const;
+    QString missionSignature(int systemId, const QList<mavlink_mission_item_int_t> &items) const;
+    void savePlanMetadata();
+    bool restorePlanMetadata();
+    bool recoverGeneratedPlan();
 };

@@ -2,6 +2,8 @@
 #include <QGeoCoordinate>
 #include <cmath>
 #include <algorithm>
+#include <QCryptographicHash>
+#include <QDataStream>
 
 namespace {
 constexpr double pi = 3.14159265358979323846;
@@ -27,6 +29,7 @@ bool navigation(const mavlink_mission_item_int_t &i) {
 }
 
 bool VehicleLink::missionBusy() const {
+    if (!m_planActive) return false;
     for (const auto &transfer:m_missionTransfers)
         if (transfer.operation!=MissionTransfer::Done && transfer.operation!=MissionTransfer::Failed) return true;
     return false;
@@ -40,23 +43,41 @@ QVariantList VehicleLink::planItems() const {
     QVariantList result;
     if (m_loadedPlan) {
         for (const auto &v:m_planVehicles) {
+            if (v.id!=m_planVehicleId) continue;
             const auto mission=m_plannedMissions.value(v.id);
+            double incomingSpeed=0;
             for (int seq=0;seq<mission.size();++seq) {
                 const auto &i=mission[seq];
+                if (i.command==MAV_CMD_DO_CHANGE_SPEED && i.param1<2 && i.param2>0) incomingSpeed=i.param2;
                 const int row=rowForSystem(v.id);
                 if (seq==0 && row>=0 && m_peers[row].autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA && i.command==MAV_CMD_NAV_WAYPOINT) continue;
                 const QString command=i.command==MAV_CMD_NAV_TAKEOFF ? "Takeoff" : i.command==MAV_CMD_NAV_WAYPOINT ? "Waypoint"
-                    : i.command==MAV_CMD_DO_CHANGE_SPEED ? "Speed" : i.command==MAV_CMD_NAV_LAND ? "Land" : QString("Command %1").arg(i.command);
+                    : i.command==MAV_CMD_DO_CHANGE_SPEED ? "Speed" : i.command==MAV_CMD_NAV_LAND ? "Land" : i.command==MAV_CMD_NAV_RETURN_TO_LAUNCH ? "RTL" : QString("Command %1").arg(i.command);
                 result.append(QVariantMap{{"title",QString("%1 · %2 · %3").arg(nameForSystem(v.id)).arg(seq).arg(command)},
-                    {"altitude",double(i.z)},{"speed",i.command==MAV_CMD_DO_CHANGE_SPEED ? double(i.param2) : 0.0},
-                    {"editable",false},{"frame",int(i.frame)}});
+                    {"altitude",double(i.z)},{"speed",i.command==MAV_CMD_DO_CHANGE_SPEED ? double(i.param2) : incomingSpeed},
+                    {"editable",false},{"hasAltitude",navigation(i)},{"frame",int(i.frame)},{"sequence",seq},{"deletable",i.command!=MAV_CMD_NAV_TAKEOFF},{"isRtl",i.command==MAV_CMD_NAV_RETURN_TO_LAUNCH}});
             }
         }
     } else for (int n=0;n<m_planPoints.size();++n) {
         const auto &p=m_planPoints[n];
+        const auto mission=m_plannedMissions.value(m_planVehicleId);
+        const auto sequences=m_pointSequences.value(m_planVehicleId);
+        QVariantList commands; double lat=p.latitude,lon=p.longitude;
+        if (sequences.size()==m_planPoints.size() && sequences[n]<mission.size()) {
+            const auto &destination=mission[sequences[n]]; lat=destination.x/1e7; lon=destination.y/1e7;
+            const int begin=n ? sequences[n-1]+1 : sequences[0];
+            const int end=n==m_planPoints.size()-1 ? int(mission.size())-1-(m_planRtl ? 1 : 0) : sequences[n];
+            for (int seq=begin;seq<=end;++seq) {
+                const auto &i=mission[seq];
+                commands.append(QVariantMap{{"sequence",seq},{"command",int(i.command)},{"altitude",double(i.z)},
+                    {"speed",double(i.param2)},{"speedType",double(i.param1)},{"hold",double(i.param1)}});
+            }
+        }
         result.append(QVariantMap{{"title",n==0 ? QString("Takeoff") : QString("Waypoint %1").arg(n)},
-            {"altitude",p.altitude},{"speed",p.speed},{"editable",true},{"frame",int(MAV_FRAME_GLOBAL_RELATIVE_ALT_INT)}});
+            {"altitude",p.altitude},{"speed",p.speed},{"editable",true},{"frame",int(MAV_FRAME_GLOBAL_RELATIVE_ALT_INT)},
+            {"deletable",n>0},{"isRtl",false},{"latitude",lat},{"longitude",lon},{"commands",commands}});
     }
+    if (!m_loadedPlan && m_planRtl) result.append(QVariantMap{{"title","RTL"},{"altitude",0.0},{"speed",0.0},{"editable",false},{"deletable",true},{"isRtl",true}});
     return result;
 }
 QVariantList VehicleLink::planCenterPath() const {
@@ -64,18 +85,27 @@ QVariantList VehicleLink::planCenterPath() const {
     for (const auto &p:m_planPoints) result.append(QVariantMap{{"latitude",p.latitude},{"longitude",p.longitude}});
     return result;
 }
-QVariantList VehicleLink::planPaths() const {
+QVariantList VehicleLink::planPaths() const { return missionPaths(m_plannedMissions,true); }
+QVariantList VehicleLink::flightPaths() const { return missionPaths(m_flightMissions,false); }
+QVariantList VehicleLink::missionPaths(const QMap<int,QList<mavlink_mission_item_int_t>> &missions,bool planning) const {
     QVariantList result;
-    for (const auto &v:m_planVehicles) {
+    for (auto it=missions.cbegin();it!=missions.cend();++it) {
+        const int row=rowForSystem(it.key()); if (row<0) continue;
+        const auto &peer=m_peers[row];
+        double homeLat=peer.homeLatitude,homeLon=peer.homeLongitude;
+        if (planning) for (const auto &v:m_planVehicles) if (v.id==it.key()) { homeLat=v.latitude; homeLon=v.longitude; }
         QVariantList path;
-        for (const auto &i:m_plannedMissions.value(v.id)) if (navigation(i)) {
-            // ArduPilot sequence zero is its home placeholder, not a flown waypoint.
-            const int row=rowForSystem(v.id);
-            if (i.seq==0 && row>=0 && m_peers[row].autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA && i.command==MAV_CMD_NAV_WAYPOINT) continue;
-            const bool atStart=i.command==MAV_CMD_NAV_TAKEOFF && !i.x && !i.y;
-            path.append(QVariantMap{{"latitude",atStart ? v.latitude : i.x/1e7},{"longitude",atStart ? v.longitude : i.y/1e7},{"altitude",double(i.z)}});
+        for (const auto &i:it.value()) {
+            if (i.seq==0 && peer.autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA && i.command==MAV_CMD_NAV_WAYPOINT) continue;
+            if (i.command==MAV_CMD_NAV_RETURN_TO_LAUNCH) {
+                if (QGeoCoordinate(homeLat,homeLon).isValid()) path.append(QVariantMap{{"latitude",homeLat},{"longitude",homeLon},{"altitude",0.0}});
+            } else if (navigation(i)) {
+                const bool atStart=i.command==MAV_CMD_NAV_TAKEOFF && !i.x && !i.y;
+                const double lat=atStart ? homeLat : i.x/1e7,lon=atStart ? homeLon : i.y/1e7;
+                if (QGeoCoordinate(lat,lon).isValid()) path.append(QVariantMap{{"latitude",lat},{"longitude",lon},{"altitude",double(i.z)}});
+            }
         }
-        result.append(QVariantMap{{"systemId",v.id},{"name",nameForSystem(v.id)},{"path",path}});
+        result.append(QVariantMap{{"systemId",it.key()},{"name",nameForSystem(it.key())},{"path",path}});
     }
     return result;
 }
@@ -95,7 +125,8 @@ void VehicleLink::togglePlan() {
     }
     if (vehicles.isEmpty()) return;
     m_planVehicles=vehicles; m_planPoints.clear(); m_plannedMissions.clear(); m_missionTransfers.clear();
-    m_planActive=true; m_planValid=false; m_loadedPlan=false;
+    m_planActive=true; m_planValid=false; m_loadedPlan=false; m_planRtl=false; m_uploadingPlan=false;
+    m_planVehicleId=vehicles.first().id; m_selectedPlanItem=-1; emit planSelectionChanged();
     m_planStatus="Loading missions from selected vehicles…";
     for (const auto &v:m_planVehicles) { m_missionTransfers.insert(v.id,{}); sendMissionTransfer(v.id); }
     emit planChanged();
@@ -111,7 +142,8 @@ void VehicleLink::addPlanWaypoint(double latitude,double longitude) {
     if (m_loadedPlan) { emit notice("Clear loaded missions before creating a new swarm route."); return; }
     if (!QGeoCoordinate(latitude,longitude).isValid() || m_planPoints.size()>=100) return;
     const auto previous=m_planPoints.isEmpty() ? PlanPoint{} : m_planPoints.last();
-    m_planPoints.append({latitude,longitude,previous.altitude,previous.speed}); rebuildPlan();
+    m_planPoints.append({latitude,longitude,previous.altitude,previous.speed});
+    m_selectedPlanItem=m_planPoints.size()-1; rebuildPlan(); emit planSelectionChanged();
 }
 void VehicleLink::editPlanItem(int row,double altitudeFeet,double speed) {
     const double altitude=altitudeFeet*0.3048;
@@ -120,12 +152,21 @@ void VehicleLink::editPlanItem(int row,double altitudeFeet,double speed) {
     m_planPoints[row].altitude=altitude; m_planPoints[row].speed=speed; rebuildPlan();
 }
 void VehicleLink::removePlanItem(int row) {
-    if (m_loadedPlan || missionBusy() || row<=0 || row>=m_planPoints.size()) return;
-    m_planPoints.removeAt(row); rebuildPlan();
+    if (missionBusy()) return;
+    if (m_loadedPlan) {
+        const auto rows=planItems(); if (row<0 || row>=rows.size() || !rows[row].toMap().value("deletable").toBool()) return;
+        auto &mission=m_plannedMissions[m_planVehicleId]; mission.removeAt(rows[row].toMap().value("sequence").toInt());
+        for (int seq=0;seq<mission.size();++seq) mission[seq].seq=seq;
+        m_planValid=true; m_planStatus="Edited imported mission · swarm separation not checked.";
+        m_selectedPlanItem=-1; emit planChanged(); emit planSelectionChanged(); return;
+    }
+    if (m_planRtl && row==m_planPoints.size()) m_planRtl=false;
+    else { if (row<=0 || row>=m_planPoints.size()) return; m_planPoints.removeAt(row); }
+    m_selectedPlanItem=std::min(row,int(m_planPoints.size())-1); rebuildPlan(); emit planSelectionChanged();
 }
 
 void VehicleLink::rebuildPlan() {
-    m_plannedMissions.clear(); m_planValid=false;
+    m_plannedMissions.clear(); m_pointSequences.clear(); m_planValid=false;
     if (m_planVehicles.isEmpty()) { emit planChanged(); return; }
     // One local metric frame keeps all formation translations parallel, including across the date line.
     const QGeoCoordinate origin(m_planVehicles.first().latitude,m_planVehicles.first().longitude);
@@ -193,13 +234,17 @@ void VehicleLink::rebuildPlan() {
             mission.append(item(MAV_CMD_NAV_WAYPOINT,vehicle.latitude,vehicle.longitude));
         const auto first=geographic(origin,stages.first()[n]);
         mission.append(item(MAV_CMD_NAV_TAKEOFF,first.latitude(),first.longitude(),m_planPoints.first().altitude));
+        QList<int> sequences{int(mission.size())-1};
+        int lastNavigation=int(mission.size())-1;
         for (int s=1;s<stages.size();++s) {
             const auto d=stages[s][n]-stages[s-1][n];
             const double horizontal=std::hypot(d.x,d.y), vertical=std::abs(d.z);
             if ((horizontal>0.01 && horizontal/durations[s]<0.1) || (vertical>0.01 && vertical/durations[s]<0.1))
                 error="Nominal synchronization requires a speed below 0.1 m/s. Adjust the waypoint or incoming speed.";
             if (horizontal<0.01 && vertical<0.01) {
-                auto wait=item(MAV_CMD_NAV_DELAY); wait.param1=durations[s]; mission.append(wait); continue;
+                auto wait=item(MAV_CMD_NAV_DELAY); wait.param1=durations[s]; mission.append(wait);
+                if (offsets.size()>1 && s%3==0) sequences.append(lastNavigation);
+                continue;
             }
             if (horizontal>0.01) { auto speed=item(MAV_CMD_DO_CHANGE_SPEED); speed.param1=1; speed.param2=std::max(0.1,horizontal/durations[s]); speed.param3=-1; mission.append(speed); }
             if (vertical>0.01) { auto speed=item(MAV_CMD_DO_CHANGE_SPEED); speed.param1=d.z>0 ? 2 : 3; speed.param2=std::max(0.1,vertical/durations[s]); speed.param3=-1; mission.append(speed); }
@@ -207,13 +252,16 @@ void VehicleLink::rebuildPlan() {
             const double altitude=stages[s][n].z-vehicle.homeAltitude;
             if (origin.distanceTo(coordinate)>25000 || altitude>500 || altitude<0.3) error="Route exceeds the 25 km local planning area or 500 m relative altitude limit.";
             auto waypoint=item(MAV_CMD_NAV_WAYPOINT,coordinate.latitude(),coordinate.longitude(),altitude);
-            waypoint.param2=0.5; mission.append(waypoint);
+            waypoint.param2=0.5; mission.append(waypoint); lastNavigation=int(mission.size())-1;
+            if (offsets.size()==1 || s%3==0) sequences.append(lastNavigation);
         }
+        m_pointSequences[vehicle.id]=sequences;
+        if (m_planRtl) { auto rtl=item(MAV_CMD_NAV_RETURN_TO_LAUNCH); rtl.frame=MAV_FRAME_MISSION; mission.append(rtl); }
         for (int seq=0;seq<mission.size();++seq) { mission[seq].seq=seq; mission[seq].current=seq==0; }
         m_plannedMissions[vehicle.id]=mission;
     }
-    m_planValid=error.isEmpty() && m_planPoints.size()>1;
-    m_planStatus=!error.isEmpty() ? error : m_planPoints.size()==1 ? "Click the map to add a waypoint."
+    m_planValid=error.isEmpty() && (m_planPoints.size()>1 || m_planRtl);
+    m_planStatus=!error.isEmpty() ? error : m_planPoints.size()==1 && !m_planRtl ? "Click the map to add a waypoint."
         : QString("Separation checked · nominal route %1 s · synchronized speed targets").arg(std::ceil(totalSeconds));
     emit planChanged();
 }
@@ -251,7 +299,7 @@ void VehicleLink::sendMissionTransfer(int systemId) {
 }
 
 bool VehicleLink::receiveMission(Peer &peer,const mavlink_message_t &message) {
-    if (!m_planActive || !m_missionTransfers.contains(peer.systemId)) return false;
+    if (!m_missionTransfers.contains(peer.systemId)) return false;
     auto &transfer=m_missionTransfers[peer.systemId];
     if (transfer.operation==MissionTransfer::Done || transfer.operation==MissionTransfer::Failed) return false;
     auto addressed=[](int system,int component,int type) { return (!system || system==255) && (!component || component==MAV_COMP_ID_MISSIONPLANNER) && type==MAV_MISSION_TYPE_MISSION; };
@@ -299,10 +347,14 @@ bool VehicleLink::receiveMission(Peer &peer,const mavlink_message_t &message) {
         if (!addressed(ack.target_system,ack.target_component,ack.mission_type)) return true;
         if (ack.type!=MAV_MISSION_ACCEPTED) { transfer.operation=MissionTransfer::Failed; transfer.error=QString("rejected (%1)").arg(ack.type); }
         else if (transfer.operation==MissionTransfer::Clear || (transfer.operation==MissionTransfer::Upload && transfer.received.size()==transfer.items.size())) {
+            if (transfer.operation==MissionTransfer::Clear) m_flightMissions[peer.systemId].clear();
+            else m_flightMissions[peer.systemId]=transfer.items;
             peer.missionCount=transfer.operation==MissionTransfer::Clear ? 0 : std::max(0,int(transfer.items.size())-(peer.autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA ? 1 : 0)); transfer.operation=MissionTransfer::Done;
         }
     } else return false;
-    if (!missionBusy()) finishMissionDownloads();
+    if (transfer.operation==MissionTransfer::Done && !transfer.items.isEmpty()) m_flightMissions[peer.systemId]=transfer.items;
+    else if (transfer.operation==MissionTransfer::Done && transfer.count==0) m_flightMissions[peer.systemId].clear();
+    if (m_planActive && !missionBusy()) finishMissionDownloads();
     emit planChanged(); return true;
 }
 
@@ -329,57 +381,55 @@ void VehicleLink::finishMissionDownloads() {
         }
         m_loadedPlan=any;
         if (any) {
-            // Display the center of corresponding navigation items without modifying downloaded missions.
-            const auto paths=planPaths(); int count=2000;
-            for (const auto &p:paths) count=std::min(count,int(p.toMap().value("path").toList().size()));
-            for (int n=0;n<count;++n) {
-                double x=0,y=0,z=0;
-                for (const auto &p:paths) {
-                    const auto point=p.toMap().value("path").toList()[n].toMap();
-                    const double lat=point.value("latitude").toDouble()*pi/180,lon=point.value("longitude").toDouble()*pi/180;
-                    x+=std::cos(lat)*std::cos(lon); y+=std::cos(lat)*std::sin(lon); z+=std::sin(lat);
-                }
-                m_planPoints.append({std::atan2(z,std::hypot(x,y))*180/pi,std::atan2(y,x)*180/pi});
-            }
-            m_planValid=false; m_planStatus="Loaded original missions unchanged. Clear to create a checked swarm route.";
+            if (restorePlanMetadata() || recoverGeneratedPlan()) {
+                m_loadedPlan=false; m_planStatus="Restored center route and downloaded vehicle missions.";
+            } else { m_planValid=false; m_planStatus="Imported missions · select a vehicle to view its items."; }
+
         }
         else rebuildPlan();
-    } else m_planStatus="Missions saved on all planning vehicles.";
+    } else {
+        m_planStatus="Missions saved on all planning vehicles.";
+        if (m_uploadingPlan) {
+            if (!m_loadedPlan) savePlanMetadata();
+            else m_settings->remove("missionPlans/"+missionPlanKey());
+        }
+    }
+    m_uploadingPlan=false;
 }
 
 void VehicleLink::missionTick() {
-    if (!m_planActive) return;
-    for (const auto &v:m_planVehicles) {
+    if (m_planActive) for (const auto &v:m_planVehicles) {
         const int row=rowForSystem(v.id);
         if ((row<0 || m_peers[row].session!=v.session) && m_planValid) {
             m_planValid=false; m_planStatus="A planning vehicle disconnected. Return to Fly and select again."; emit planChanged();
         }
     }
-    if (!missionBusy()) return;
+    bool activeTransfer=false;
     for (auto it=m_missionTransfers.begin();it!=m_missionTransfers.end();++it) {
         if (it->operation==MissionTransfer::Done || it->operation==MissionTransfer::Failed) continue;
+        activeTransfer=true;
         const int row=rowForSystem(it.key());
         bool valid=row>=0;
-        for (const auto &v:m_planVehicles) if (v.id==it.key() && valid) valid=m_peers[row].session==v.session;
+        if (m_planActive) for (const auto &v:m_planVehicles) if (v.id==it.key() && valid) valid=m_peers[row].session==v.session;
         if (!valid || (m_clock.elapsed()>=it->retryAt && it->attempts>=5)) {
             it->operation=MissionTransfer::Failed; it->error=valid ? "timed out" : "disconnected"; emit planChanged();
         } else if (m_clock.elapsed()>=it->retryAt) sendMissionTransfer(it.key());
     }
-    if (!missionBusy()) { finishMissionDownloads(); emit planChanged(); }
+    if (activeTransfer && m_planActive && !missionBusy()) { finishMissionDownloads(); emit planChanged(); }
 }
 
 void VehicleLink::clearPlanMissions() {
     if (!m_planActive || missionBusy()) return;
     for (const auto &v:m_planVehicles) { const int row=rowForSystem(v.id); if (row<0 || m_peers[row].session!=v.session || m_peers[row].armed) { emit notice("Clear requires all planning vehicles connected and disarmed."); return; } }
-    m_planPoints.clear(); m_plannedMissions.clear(); m_loadedPlan=false; m_planValid=false;
+    m_planPoints.clear(); m_plannedMissions.clear(); m_loadedPlan=false; m_planValid=false; m_planRtl=false; m_selectedPlanItem=-1; m_uploadingPlan=false;
     m_planStatus="Clearing missions…"; m_missionTransfers.clear();
     for (const auto &v:m_planVehicles) { MissionTransfer t; t.operation=MissionTransfer::Clear; m_missionTransfers.insert(v.id,t); sendMissionTransfer(v.id); clearNavigation(v.id); }
     emit planChanged();
 }
 void VehicleLink::uploadPlanMissions() {
-    if (!m_planActive || !m_planValid || m_loadedPlan || missionBusy()) return;
+    if (!m_planActive || !m_planValid || missionBusy()) return;
     for (const auto &v:m_planVehicles) { const int row=rowForSystem(v.id); if (row<0 || m_peers[row].session!=v.session || m_peers[row].armed) { emit notice("Upload requires all planning vehicles connected and disarmed."); return; } }
-    m_missionTransfers.clear(); m_planStatus="Uploading missions…";
+    m_missionTransfers.clear(); m_uploadingPlan=true; m_planStatus="Uploading missions…";
     for (const auto &v:m_planVehicles) { MissionTransfer t; t.operation=MissionTransfer::Upload; t.next=-1; t.items=m_plannedMissions.value(v.id); m_missionTransfers.insert(v.id,t); sendMissionTransfer(v.id); clearNavigation(v.id); }
     emit planChanged();
 }

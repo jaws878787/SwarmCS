@@ -56,6 +56,31 @@ QList<mavlink_message_t> readPackets(QUdpSocket &socket) {
     }
     return result;
 }
+void downloadMission(QUdpSocket &socket,VehicleLink &link,int id,const QList<mavlink_mission_item_int_t> &items) {
+    mavlink_message_t msg{};
+    mavlink_msg_mission_count_pack(id,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,items.size(),MAV_MISSION_TYPE_MISSION,0);
+    sendPacket(socket,link,msg);
+    for (auto i:items) {
+        QTest::qWait(35); heartbeat(socket,link,id);
+        i.target_system=255; i.target_component=MAV_COMP_ID_MISSIONPLANNER;
+        mavlink_msg_mission_item_int_encode(id,1,&msg,&i); sendPacket(socket,link,msg);
+    }
+    QTest::qWait(40);
+}
+QList<mavlink_mission_item_int_t> uploadMission(QUdpSocket &socket,VehicleLink &link,int id) {
+    int count=0;
+    for (const auto &message:readPackets(socket)) if (message.msgid==MAVLINK_MSG_ID_MISSION_COUNT) count=mavlink_msg_mission_count_get_count(&message);
+    QList<mavlink_mission_item_int_t> items;
+    for (int seq=0;seq<count;++seq) {
+        heartbeat(socket,link,id);
+        mavlink_message_t msg{}; mavlink_msg_mission_request_int_pack(id,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,seq,MAV_MISSION_TYPE_MISSION); sendPacket(socket,link,msg);
+        for (const auto &message:readPackets(socket)) if (message.msgid==MAVLINK_MSG_ID_MISSION_ITEM_INT) {
+            mavlink_mission_item_int_t i{}; mavlink_msg_mission_item_int_decode(&message,&i); items.append(i);
+        }
+    }
+    mavlink_message_t ack{}; mavlink_msg_mission_ack_pack(id,1,&ack,255,MAV_COMP_ID_MISSIONPLANNER,MAV_MISSION_ACCEPTED,MAV_MISSION_TYPE_MISSION,0); sendPacket(socket,link,ack);
+    QTest::qWait(40); return items;
+}
 }
 
 class VehicleLinkTest : public QObject {
@@ -63,6 +88,72 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void missionFilteringAndFlyPaths() {
+        VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[2]; link.toggle();
+        QList<mavlink_mission_item_int_t> missions[2];
+        for (int n=0;n<2;++n) {
+            QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0)); heartbeat(vehicles[n],link,n+1);
+        }
+        QTRY_COMPARE(link.count(),2);
+        for (int n=0;n<2;++n) {
+            mavlink_global_position_int_t p{}; p.lat=390000000; p.lon=-860000000+n*2500; p.alt=200000;
+            mavlink_message_t msg{}; mavlink_msg_global_position_int_encode(n+1,1,&msg,&p); sendPacket(vehicles[n],link,msg);
+            for (int seq=0;seq<3;++seq) {
+                mavlink_mission_item_int_t i{}; i.command=MAV_CMD_NAV_WAYPOINT; i.seq=seq; i.frame=MAV_FRAME_GLOBAL_RELATIVE_ALT_INT;
+                i.x=p.lat+seq*10000; i.y=p.lon; i.z=20+n; missions[n].append(i);
+            }
+            downloadMission(vehicles[n],link,n+1,missions[n]);
+        }
+        QTRY_COMPARE(link.flightPaths().size(),2);
+        QVERIFY(!link.planActive()); QCOMPARE(link.flightPaths()[0].toMap().value("path").toList().size(),2);
+        const auto actual=link.flightPaths();
+        link.selectGroup("Ungrouped"); link.togglePlan();
+        for (int n=0;n<2;++n) downloadMission(vehicles[n],link,n+1,missions[n]);
+        QTRY_VERIFY(!link.missionBusy()); QCOMPARE(link.planItems().size(),2);
+        QVERIFY(link.planItems()[0].toMap().value("title").toString().contains("Vehicle 1"));
+        link.setPlanVehicleId(2); QCOMPARE(link.planItems().size(),2);
+        for (const auto &row:link.planItems()) QVERIFY(row.toMap().value("title").toString().contains("Vehicle 2"));
+        link.selectPlanItem(0); link.movePlanWaypoint(0,39.01,-86.01);
+        QCOMPARE(link.planMarkers().first().toMap().value("latitude").toDouble(),39.01);
+        QCOMPARE(link.flightPaths(),actual);
+        link.removePlanItem(0); QCOMPARE(link.planItems().size(),1);
+        link.addPlanRtl(); QVERIFY(link.planItems().last().toMap().value("isRtl").toBool());
+        link.setPlanVehicleId(1); QCOMPARE(link.planItems().size(),2); // Other vehicle's mission stays intact.
+    }
+    void legacySwarmPlanStageRecovery() {
+        VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[2]; link.toggle();
+        for (int n=0;n<2;++n) { QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0)); heartbeat(vehicles[n],link,n+1); }
+        QTRY_COMPARE(link.count(),2);
+        for (int n=0;n<2;++n) {
+            mavlink_global_position_int_t p{}; p.lat=390000000; p.lon=-860000000+n*2500; p.alt=200000;
+            mavlink_message_t msg{}; mavlink_msg_global_position_int_encode(n+1,1,&msg,&p); sendPacket(vehicles[n],link,msg);
+        }
+        QTRY_VERIFY(link.vehicleDetails(2).value("positionValid").toBool());
+        link.selectGroup("Ungrouped"); link.togglePlan();
+        for (int n=0;n<2;++n) downloadMission(vehicles[n],link,n+1,{});
+        QTRY_VERIFY(!link.missionBusy());
+        link.addPlanWaypoint(39.001,-86.001); link.addPlanWaypoint(39.002,-86.002); link.addPlanRtl();
+        const auto centers=link.planCenterPath(); QVERIFY(link.planValid());
+        for (auto &v:vehicles) readPackets(v);
+        link.uploadPlanMissions();
+        QList<mavlink_mission_item_int_t> missions[2];
+        for (int n=0;n<2;++n) missions[n]=uploadMission(vehicles[n],link,n+1);
+        QTRY_VERIFY(!link.missionBusy()); QVERIFY(!missions[0].isEmpty()); QVERIFY(!missions[1].isEmpty());
+        const auto paths=link.planPaths();
+        QSettings stored(settingsFile(),QSettings::IniFormat);
+        QVERIFY(stored.contains("missionPlans/1-2"));
+        stored.remove("missionPlans/1-2"); stored.sync(); // Simulate a plan uploaded before sidecar support.
+        link.togglePlan(); link.togglePlan();
+        for (int n=0;n<2;++n) downloadMission(vehicles[n],link,n+1,missions[n]);
+        QTRY_VERIFY(!link.missionBusy()); QCOMPARE(link.planCenterPath().size(),centers.size());
+        QCOMPARE(link.planPaths(),paths);
+        for (int n=0;n<centers.size();++n) {
+            const auto original=centers[n].toMap(),restored=link.planCenterPath()[n].toMap();
+            QVERIFY(std::abs(original.value("latitude").toDouble()-restored.value("latitude").toDouble())<1e-6);
+            QVERIFY(std::abs(original.value("longitude").toDouble()-restored.value("longitude").toDouble())<1e-6);
+        }
+        QVERIFY(link.planItems().last().toMap().value("isRtl").toBool());
+    }
     void missionDownloadClearAndUpload() {
         VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicle;
         QVERIFY(vehicle.bind(QHostAddress::LocalHost,0)); link.toggle(); heartbeat(vehicle,link,1);
@@ -94,12 +185,14 @@ private slots:
         mavlink_msg_mission_ack_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,MAV_MISSION_ACCEPTED,MAV_MISSION_TYPE_MISSION,0); sendPacket(vehicle,link,msg);
         QTest::qWait(50); QVERIFY(link.missionBusy());
         bool speedSeen=false;
+        QList<mavlink_mission_item_int_t> uploaded;
         for (int seq=0;seq<count;++seq) {
             mavlink_msg_mission_request_int_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,seq,MAV_MISSION_TYPE_MISSION); sendPacket(vehicle,link,msg);
             bool found=false;
             for (const auto &packet:readPackets(vehicle)) if (packet.msgid==MAVLINK_MSG_ID_MISSION_ITEM_INT) {
                 mavlink_mission_item_int_t sent{}; mavlink_msg_mission_item_int_decode(&packet,&sent);
                 QCOMPARE(int(sent.seq),seq); found=true;
+                uploaded.append(sent);
                 if (sent.command==MAV_CMD_DO_CHANGE_SPEED) { speedSeen=true; QVERIFY(sent.param2>0); QCOMPARE(sent.param1,1.0f); }
             }
             QVERIFY(found);
@@ -107,6 +200,28 @@ private slots:
         QVERIFY(speedSeen);
         mavlink_msg_mission_ack_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,MAV_MISSION_ACCEPTED,MAV_MISSION_TYPE_MISSION,0); sendPacket(vehicle,link,msg);
         QTRY_VERIFY(!link.missionBusy()); QVERIFY(link.planStatus().contains("saved"));
+        const auto originalCenters=link.planCenterPath();
+        const auto actualPaths=link.flightPaths(); QVERIFY(!actualPaths.isEmpty());
+        link.togglePlan(); QVERIFY(!link.planActive());
+        QCOMPARE(link.flightPaths(),actualPaths);
+        link.togglePlan(); QVERIFY(link.planActive());
+        mavlink_msg_mission_count_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,uploaded.size(),MAV_MISSION_TYPE_MISSION,0); sendPacket(vehicle,link,msg);
+        for (auto saved:uploaded) {
+            QTest::qWait(45);
+            saved.target_system=255; saved.target_component=MAV_COMP_ID_MISSIONPLANNER;
+            saved.current=0; // Current mission item may change without changing the route.
+            mavlink_msg_mission_item_int_encode(1,1,&msg,&saved); sendPacket(vehicle,link,msg);
+        }
+        QTRY_VERIFY(!link.missionBusy());
+        QCOMPARE(link.planCenterPath(),originalCenters);
+        QVERIFY(link.planItems().last().toMap().value("editable").toBool());
+        link.selectPlanItem(1); QCOMPARE(link.selectedPlanItem(),1);
+        link.movePlanWaypoint(1,39.002,-86.002);
+        QCOMPARE(link.planCenterPath().last().toMap().value("latitude").toDouble(),39.002);
+        QCOMPARE(link.flightPaths(),actualPaths); // Draft edits are not onboard mission changes.
+        link.addPlanRtl(); QVERIFY(link.planItems().last().toMap().value("isRtl").toBool());
+        link.removePlanItem(2); QCOMPARE(link.planItems().size(),2);
+        link.removePlanItem(link.selectedPlanItem()); QCOMPARE(link.planItems().size(),1);
         link.toggle(); QVERIFY(!link.planActive());
     }
     void multiSelectionAndPlanning() {
