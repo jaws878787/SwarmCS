@@ -14,6 +14,7 @@ Rectangle {
     required property string vehicleGroup
     required property string iconId
     required property bool commandPending
+    required property string errorMessage
     signal contextRequested(int sysId)
     signal settingsRequested(int sysId)
     signal modesRequested(int sysId)
@@ -108,6 +109,28 @@ Rectangle {
                     }
                 }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: vehicleLink.toggleVelocityUnit() }
+            }
+        }
+        Label {
+            visible: card.errorMessage.length > 0
+            text: card.errorMessage
+            textFormat: Text.PlainText
+            color: "#ffb6a2"
+            font.pixelSize: 9
+            wrapMode: Text.WordWrap
+            maximumLineCount: 3
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+            Layout.topMargin: 3
+            HoverHandler { id: errorHover }
+            ToolTip {
+                id: errorTip
+                visible: errorHover.hovered
+                delay: 500
+                width: 320
+                text: card.errorMessage
+                background: Rectangle { color: "#203743"; border.color: "#557584"; radius: 5 }
+                contentItem: Label { text: errorTip.text; textFormat: Text.PlainText; color: "#e5edf3"; wrapMode: Text.WordWrap; font.pixelSize: 11 }
             }
         }
     }

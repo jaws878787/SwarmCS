@@ -27,7 +27,7 @@ public:
     enum Role { SystemIdRole = Qt::UserRole + 1, VehicleNameRole, FirmwareRole,
                 ArmedRole, FlightModeRole, AltitudeRole, VelocityRole, VehicleGroupRole,
                 LatitudeRole, LongitudeRole, HeadingRole, PositionValidRole, IconIdRole,
-                CommandPendingRole, CommandStatusRole };
+                CommandPendingRole, CommandStatusRole, ErrorMessageRole };
     Q_ENUM(Role)
     explicit VehicleLink(QObject *parent = nullptr, const QString &settingsFile = {}, quint16 port = 14550);
     int rowCount(const QModelIndex &parent = {}) const override;
@@ -120,6 +120,15 @@ private:
         int desiredStandardMode = 0;
         qint64 commandDeadline = 0;
         QString commandStatus;
+        QString errorMessage;
+        bool preArmError = false;
+        bool commandError = false;
+        qint64 errorTime = -1;
+        QByteArray statusTextBuffer;
+        quint16 statusTextId = 0;
+        int statusTextNext = 0;
+        quint8 statusTextSeverity = 0;
+        qint64 statusTextTime = -1;
         double queuedTakeoff = std::numeric_limits<double>::quiet_NaN();
         double takeoffTarget = std::numeric_limits<double>::quiet_NaN();
         double homeAltitude = std::numeric_limits<double>::quiet_NaN();
@@ -140,7 +149,10 @@ private:
     bool reportedModesComplete(const Peer &peer) const;
     void requestModes(Peer &peer);
     bool sendCommand(Peer &peer, quint16 command, float p1 = 0, float p2 = 0, float p3 = 0);
-    void finishCommand(Peer &peer, const QString &message);
+    void finishCommand(Peer &peer, const QString &message, bool error = false);
+    bool failVehicle(Peer &peer, const QString &message, bool preArm = false);
+    void clearVehicleError(Peer &peer);
+    void receiveStatusText(Peer &peer, const mavlink_message_t &message);
     void confirmState(Peer &peer);
     void receive();
     void tick();

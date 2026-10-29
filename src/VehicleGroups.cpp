@@ -69,17 +69,20 @@ void VehicleLink::groupAction(const QString &group, const QString &action, const
             if (success) {
                 peer.pendingCommand = MAV_CMD_MISSION_START;
                 peer.commandDeadline = m_clock.elapsed() + 10000;
-                peer.commandStatus = "Requesting mission start…";
+                peer.commandStatus = "Starting mission…";
                 const auto row = rowForSystem(id);
                 emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
             }
+        } else if (action == "mission" && !peer.armed) {
+            failVehicle(peer,"Mission: arm first.");
         }
         if (success) ++sent;
         else skipped.append(item.value("name").toString());
     }
-    QString report = QString("%1 vehicle request(s) submitted. Results are confirmed by vehicle telemetry or command acknowledgement.").arg(sent);
-    if (!skipped.isEmpty()) report += "\n\nSkipped: " + skipped.join(", ")
-        + ". A vehicle may be busy or its mode unavailable. Takeoff preserves mission-mode vehicles and their mission altitude. Takeoff and mission start require the vehicle to be armed.";
-    if (vehicles.isEmpty()) report = "There are no connected vehicles in this group.";
-    emit operationReport("Group · " + group, report);
+    const QString label = action == "arm" ? "Arm" : action == "disarm" ? "Disarm" : action == "takeoff" ? "Takeoff"
+        : action == "mission" ? "Mission" : action == "rtl" ? "RTL" : "Mode";
+    QString report = QString("%1 · %2: %3 requested").arg(group,label).arg(sent);
+    if (!skipped.isEmpty()) report += QString(", %1 skipped").arg(skipped.size());
+    if (vehicles.isEmpty()) report = group + ": no vehicles.";
+    emit notice(report);
 }

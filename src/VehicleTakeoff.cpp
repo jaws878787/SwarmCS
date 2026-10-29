@@ -21,23 +21,23 @@ bool VehicleLink::takeoff(int systemId) {
     const int row = rowForSystem(systemId);
     if (row < 0) { emit notice("Vehicle is disconnected."); return false; }
     auto &peer = m_peers[row];
-    if (isPlane(peer)) { emit notice(nameForSystem(systemId) + ": manual takeoff currently supports multicopters."); return false; }
+    if (isPlane(peer)) return failVehicle(peer,"Takeoff: multicopters only.");
     if (!peer.armed || peer.pendingCommand) {
-        emit notice(nameForSystem(systemId) + ": arm the vehicle first and wait for any pending command.");
-        return false;
+        if (peer.pendingCommand) { emit notice(nameForSystem(systemId) + ": command pending."); return false; }
+        return failVehicle(peer,"Takeoff: arm first.");
     }
     const bool mission = peer.standardMode == MAV_STANDARD_MODE_MISSION
         || (peer.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA && peer.customMode == 3)
         || (peer.autopilot == MAV_AUTOPILOT_PX4 && peer.customMode == ((4u << 16) | (4u << 24)));
     if (mission) {
         // Leave mission items, altitude frames and takeoff heights entirely with the autopilot.
-        emit notice(nameForSystem(systemId) + ": mission controls takeoff and altitude. Use Start missions to begin the mission.");
+        emit notice(nameForSystem(systemId) + ": using mission altitude.");
         return false;
     }
     if (peer.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA && peer.customMode != 4) {
         if (!setFlightMode(systemId,4)) return false;
         peer.queuedTakeoff = m_takeoffMeters;
-        peer.commandStatus = "Entering Guided for takeoff…";
+        peer.commandStatus = "Entering Guided…";
         emit dataChanged(index(row),index(row),{CommandStatusRole});
         return true;
     }
@@ -57,17 +57,16 @@ bool VehicleLink::sendTakeoff(Peer &peer, double altitude) {
             0,0,0,nan,0,0,float(altitude));
     } else {
         if (!std::isfinite(peer.homeAltitude) || peer.altitudeTime < 0 || m_clock.elapsed() - peer.altitudeTime > 5000) {
-            emit notice(nameForSystem(peer.systemId) + ": fresh altitude telemetry is required for takeoff.");
-            return false;
+            return failVehicle(peer,"Takeoff: altitude unavailable.");
         }
         mavlink_msg_command_long_pack_status(255,MAV_COMP_ID_MISSIONPLANNER,&status,&message,
             peer.systemId,peer.componentId,MAV_CMD_NAV_TAKEOFF,0,0,0,0,nan,nan,nan,float(peer.homeAltitude + altitude));
     }
-    if (!send(message,peer)) return false;
+    if (!send(message,peer)) return failVehicle(peer,"Takeoff command not sent.");
     peer.pendingCommand = MAV_CMD_NAV_TAKEOFF;
     peer.takeoffTarget = altitude;
     peer.commandDeadline = m_clock.elapsed() + 60000;
-    peer.commandStatus = QString("Taking off to %1 m above home…").arg(altitude,0,'f',2);
+    peer.commandStatus = QString("Takeoff: %1 m…").arg(altitude,0,'f',1);
     const int row = rowForSystem(peer.systemId);
     emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
     emit notice(nameForSystem(peer.systemId) + ": " + peer.commandStatus);

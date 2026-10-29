@@ -52,6 +52,60 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void vehicleErrorMessages() {
+        VehicleLink link(nullptr,settingsFile(),0);
+        QUdpSocket first, second;
+        QVERIFY(first.bind(QHostAddress::LocalHost,0));
+        QVERIFY(second.bind(QHostAddress::LocalHost,0));
+        link.toggle();
+        heartbeat(first,link,1); heartbeat(second,link,2);
+        QTRY_COMPARE(link.count(),2);
+        readCommands(first); readCommands(second);
+        auto text = [&](QUdpSocket &socket, int system, const QByteArray &bytes, int severity, int id = 0, int chunk = 0) {
+            mavlink_statustext_t payload{};
+            payload.severity = severity; payload.id = id; payload.chunk_seq = chunk;
+            std::memcpy(payload.text,bytes.constData(),std::min(size_t(50),size_t(bytes.size())));
+            mavlink_message_t message{};
+            mavlink_msg_statustext_encode(system,MAV_COMP_ID_AUTOPILOT1,&message,&payload);
+            sendPacket(socket,link,message);
+        };
+        const QByteArray reason("PreArm: Need Position Estimate");
+        text(second,1,reason,MAV_SEVERITY_WARNING);
+        QTest::qWait(70);
+        QVERIFY(link.vehicleDetails(1).value("errorMessage").toString().isEmpty());
+        text(first,1,reason,MAV_SEVERITY_WARNING);
+        QTRY_COMPARE(link.vehicleDetails(1).value("errorMessage").toString(),QString::fromLatin1(reason));
+        QVERIFY(link.vehicleDetails(2).value("errorMessage").toString().isEmpty());
+        text(first,1,"Normal status",MAV_SEVERITY_INFO);
+        QTest::qWait(70);
+        QCOMPARE(link.vehicleDetails(1).value("errorMessage").toString(),QString::fromLatin1(reason));
+        QVERIFY(link.setArmed(1,true)); readCommands(first);
+        acknowledge(first,link,1,MAV_CMD_COMPONENT_ARM_DISARM,MAV_RESULT_DENIED);
+        QTRY_VERIFY(!link.vehicleDetails(1).value("commandPending").toBool());
+        QCOMPARE(link.vehicleDetails(1).value("errorMessage").toString(),QString::fromLatin1(reason));
+        const auto diagnostic = readCommands(first);
+        QVERIFY(std::any_of(diagnostic.cbegin(),diagnostic.cend(),[](const auto &command) { return command.command == MAV_CMD_RUN_PREARM_CHECKS; }));
+        const QByteArray head = "PreArm: " + QByteArray(42,'A');
+        text(first,1,head,MAV_SEVERITY_WARNING,55,0);
+        text(first,1," missing",MAV_SEVERITY_WARNING,55,2); // Missing chunk must not produce corrupted text.
+        QTest::qWait(70);
+        QCOMPARE(link.vehicleDetails(1).value("errorMessage").toString(),QString::fromLatin1(reason));
+        text(first,1,head,MAV_SEVERITY_WARNING,56,0);
+        text(first,1," battery low",MAV_SEVERITY_WARNING,56,1);
+        QTRY_COMPARE(link.vehicleDetails(1).value("errorMessage").toString(),QString::fromLatin1(head + " battery low"));
+        mavlink_sys_status_t healthy{};
+        healthy.onboard_control_sensors_present = MAV_SYS_STATUS_PREARM_CHECK;
+        healthy.onboard_control_sensors_enabled = MAV_SYS_STATUS_PREARM_CHECK;
+        healthy.onboard_control_sensors_health = MAV_SYS_STATUS_PREARM_CHECK;
+        mavlink_message_t message{};
+        mavlink_msg_sys_status_encode(1,MAV_COMP_ID_AUTOPILOT1,&message,&healthy);
+        sendPacket(first,link,message);
+        QTRY_VERIFY(link.vehicleDetails(1).value("errorMessage").toString().isEmpty());
+        text(first,1,"PreArm: Compass not healthy",MAV_SEVERITY_CRITICAL);
+        QTRY_VERIFY(!link.vehicleDetails(1).value("errorMessage").toString().isEmpty());
+        heartbeat(first,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,true);
+        QTRY_VERIFY(link.vehicleDetails(1).value("errorMessage").toString().isEmpty());
+    }
     void parameterHelp() {
         const auto copter = parameterMetadata("copter","ATC_RAT_PIT_P");
         QCOMPARE(copter.value("units").toString(),QString("s/rad"));

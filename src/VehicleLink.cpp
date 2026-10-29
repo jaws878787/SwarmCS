@@ -7,9 +7,9 @@
 namespace {
 QString commandResult(quint8 result) {
     switch (result) {
-    case MAV_RESULT_TEMPORARILY_REJECTED: return "temporarily rejected";
-    case MAV_RESULT_DENIED: return "denied by vehicle";
-    case MAV_RESULT_UNSUPPORTED: return "unsupported by vehicle";
+    case MAV_RESULT_TEMPORARILY_REJECTED: return "rejected";
+    case MAV_RESULT_DENIED: return "denied";
+    case MAV_RESULT_UNSUPPORTED: return "unsupported";
     case MAV_RESULT_FAILED: return "failed";
     case MAV_RESULT_CANCELLED: return "cancelled";
     default: return QString("rejected (%1)").arg(result);
@@ -46,7 +46,7 @@ QHash<int, QByteArray> VehicleLink::roleNames() const {
         {VelocityRole, "velocity"}, {VehicleGroupRole, "vehicleGroup"},
         {LatitudeRole, "latitude"}, {LongitudeRole, "longitude"}, {HeadingRole, "heading"},
         {PositionValidRole, "positionValid"}, {IconIdRole, "iconId"},
-        {CommandPendingRole, "commandPending"}, {CommandStatusRole, "commandStatus"}};
+        {CommandPendingRole, "commandPending"}, {CommandStatusRole, "commandStatus"}, {ErrorMessageRole,"errorMessage"}};
 }
 
 QVariant VehicleLink::data(const QModelIndex &index, int role) const {
@@ -73,6 +73,7 @@ QVariant VehicleLink::data(const QModelIndex &index, int role) const {
     case IconIdRole: return iconForPeer(peer);
     case CommandPendingRole: return peer.pendingCommand != 0;
     case CommandStatusRole: return peer.commandStatus;
+    case ErrorMessageRole: return peer.errorMessage;
     default: return {};
     }
 }
@@ -240,14 +241,14 @@ bool VehicleLink::setArmed(int systemId, bool armed) {
     const int row = rowForSystem(systemId);
     if (row < 0) { emit notice("Vehicle is disconnected."); return false; }
     auto &peer = m_peers[row];
-    if (peer.pendingCommand) { emit notice("Wait for the current vehicle request."); return false; }
+    if (peer.pendingCommand) { emit notice(nameForSystem(systemId) + ": command pending."); return false; }
     if (peer.armed == armed) return true;
     // param2 remains zero: never bypass flight-controller arming/disarming checks.
-    if (!sendCommand(peer,MAV_CMD_COMPONENT_ARM_DISARM,armed ? 1 : 0,0)) return false;
+    if (!sendCommand(peer,MAV_CMD_COMPONENT_ARM_DISARM,armed ? 1 : 0,0)) return failVehicle(peer,"Arm command not sent.");
     peer.pendingCommand = MAV_CMD_COMPONENT_ARM_DISARM;
     peer.desiredArmed = armed;
     peer.commandDeadline = m_clock.elapsed() + 10000;
-    peer.commandStatus = armed ? "Requesting arm…" : "Requesting disarm…";
+    peer.commandStatus = armed ? "Arming…" : "Disarming…";
     emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
     emit notice(nameForSystem(systemId) + ": " + peer.commandStatus);
     return true;
@@ -257,37 +258,45 @@ bool VehicleLink::setFlightMode(int systemId, quint32 mode, int standardMode) {
     const int row = rowForSystem(systemId);
     if (row < 0) { emit notice("Vehicle is disconnected."); return false; }
     auto &peer = m_peers[row];
-    if (peer.pendingCommand) { emit notice("Wait for the current vehicle request."); return false; }
+    if (peer.pendingCommand) { emit notice(nameForSystem(systemId) + ": command pending."); return false; }
     const auto options = availableModes(systemId);
     const bool valid = std::any_of(options.cbegin(),options.cend(),[&](const QVariant &entry) {
         const auto item = entry.toMap();
         return item.value("id").toUInt() == mode && item.value("standardMode").toInt() == standardMode
             && item.value("enabled").toBool();
     });
-    if (!valid) { emit notice("This flight mode is not selectable."); return false; }
+    if (!valid) return failVehicle(peer,"Mode unavailable.");
     if ((!standardMode && peer.customMode == mode) || (standardMode && peer.standardMode == standardMode)) return true;
     const quint16 command = standardMode ? MAV_CMD_DO_SET_STANDARD_MODE : MAV_CMD_DO_SET_MODE;
     const float p1 = standardMode ? standardMode : MAV_MODE_FLAG_CUSTOM_MODE_ENABLED;
     const float p2 = standardMode ? 0 : peer.autopilot == MAV_AUTOPILOT_PX4 ? (mode >> 16) & 0xff : mode;
     const float p3 = !standardMode && peer.autopilot == MAV_AUTOPILOT_PX4 ? (mode >> 24) & 0xff : 0;
-    if (!sendCommand(peer,command,p1,p2,p3)) return false;
+    if (!sendCommand(peer,command,p1,p2,p3)) return failVehicle(peer,"Mode command not sent.");
     peer.pendingCommand = command;
     peer.desiredMode = mode;
     peer.desiredStandardMode = standardMode;
     peer.commandDeadline = m_clock.elapsed() + 10000;
-    peer.commandStatus = "Requesting flight mode…";
+    peer.commandStatus = "Changing mode…";
     emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
     emit notice(nameForSystem(systemId) + ": " + peer.commandStatus);
     return true;
 }
 
-void VehicleLink::finishCommand(Peer &peer, const QString &message) {
+void VehicleLink::finishCommand(Peer &peer, const QString &message, bool error) {
+    const auto command = peer.pendingCommand;
     peer.pendingCommand = 0;
     peer.queuedTakeoff = std::numeric_limits<double>::quiet_NaN();
     peer.commandStatus = message;
     const int row = rowForSystem(peer.systemId);
     emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
-    emit notice(nameForSystem(peer.systemId) + ": " + message);
+    if (error) {
+        if (command == MAV_CMD_COMPONENT_ARM_DISARM && peer.preArmError && m_clock.elapsed() - peer.errorTime < 10000)
+            emit notice(nameForSystem(peer.systemId) + ": pre-arm check failed.");
+        else failVehicle(peer,message);
+    } else {
+        if (peer.commandError || (peer.preArmError && peer.armed)) clearVehicleError(peer);
+        emit notice(nameForSystem(peer.systemId) + ": " + message);
+    }
 }
 
 void VehicleLink::confirmState(Peer &peer) {
@@ -297,13 +306,71 @@ void VehicleLink::confirmState(Peer &peer) {
         || (peer.pendingCommand == MAV_CMD_DO_SET_STANDARD_MODE && peer.standardMode == peer.desiredStandardMode))
     {
         const double queued = peer.queuedTakeoff;
-        finishCommand(peer,"Flight mode changed to " + peer.flightMode + ".");
+        finishCommand(peer,"Mode: " + peer.flightMode + ".");
         if (std::isfinite(queued) && !sendTakeoff(peer,queued))
-            emit notice(nameForSystem(peer.systemId) + ": takeoff cancelled; vehicle state no longer permits it.");
+            failVehicle(peer,"Takeoff cancelled.");
     }
     else if (peer.pendingCommand == MAV_CMD_NAV_TAKEOFF && peer.armed && peer.altitudeTime >= 0
         && m_clock.elapsed() - peer.altitudeTime <= 5000 && peer.altitude >= peer.takeoffTarget - 0.5)
         finishCommand(peer,"Takeoff altitude reached.");
+}
+
+bool VehicleLink::failVehicle(Peer &peer, const QString &message, bool preArm) {
+    peer.errorMessage = message;
+    peer.preArmError = preArm;
+    peer.commandError = !preArm;
+    peer.errorTime = m_clock.elapsed();
+    const int row = rowForSystem(peer.systemId);
+    emit dataChanged(index(row),index(row),{ErrorMessageRole});
+    emit notice(nameForSystem(peer.systemId) + ": " + (preArm ? QString("Pre-arm check failed.") : message.left(90)));
+    return false;
+}
+
+void VehicleLink::clearVehicleError(Peer &peer) {
+    peer.errorMessage.clear();
+    peer.preArmError = false;
+    peer.commandError = false;
+    const int row = rowForSystem(peer.systemId);
+    emit dataChanged(index(row),index(row),{ErrorMessageRole});
+}
+
+void VehicleLink::receiveStatusText(Peer &peer, const mavlink_message_t &message) {
+    mavlink_statustext_t status{};
+    mavlink_msg_statustext_decode(&message,&status);
+    const QByteArray bytes(status.text,sizeof(status.text));
+    const int terminator = bytes.indexOf('\0');
+    const auto part = terminator < 0 ? bytes : bytes.left(terminator);
+    QByteArray complete;
+    quint8 severity = status.severity;
+    if (!status.id) complete = part;
+    else {
+        if (status.chunk_seq == 0) {
+            peer.statusTextBuffer.clear();
+            peer.statusTextId = status.id;
+            peer.statusTextNext = 0;
+            peer.statusTextSeverity = status.severity;
+        }
+        if (peer.statusTextId != status.id || status.chunk_seq != peer.statusTextNext
+            || (status.chunk_seq && m_clock.elapsed() - peer.statusTextTime > 3000)) return;
+        peer.statusTextBuffer += part;
+        peer.statusTextTime = m_clock.elapsed();
+        ++peer.statusTextNext;
+        if (peer.statusTextBuffer.size() > 1000) { peer.statusTextId = 0; peer.statusTextBuffer.clear(); return; }
+        if (terminator < 0) return;
+        complete = peer.statusTextBuffer;
+        severity = peer.statusTextSeverity;
+        peer.statusTextBuffer.clear();
+        peer.statusTextId = 0;
+    }
+    const auto text = QString::fromUtf8(complete).simplified();
+    if (text.isEmpty()) return;
+    const bool preArm = text.contains("prearm",Qt::CaseInsensitive) || text.contains("pre-arm",Qt::CaseInsensitive)
+        || text.contains("preflight",Qt::CaseInsensitive) || text.startsWith("Arm:",Qt::CaseInsensitive)
+        || text.startsWith("Arming denied",Qt::CaseInsensitive);
+    if (severity <= MAV_SEVERITY_WARNING || preArm) {
+        failVehicle(peer,text,preArm);
+        peer.commandError = false; // A later successful mode change does not resolve an autopilot fault.
+    }
 }
 
 QString VehicleLink::groupForSystem(int systemId) const {
@@ -420,6 +487,7 @@ void VehicleLink::receive() {
                 if (added) peer.parameterBytewise = heartbeat.autopilot == MAV_AUTOPILOT_PX4;
                 peer.vehicleType = heartbeat.type;
                 peer.armed = heartbeat.base_mode & MAV_MODE_FLAG_SAFETY_ARMED;
+                if (peer.armed && peer.preArmError) clearVehicleError(peer);
                 if (peer.customMode != heartbeat.custom_mode) peer.standardMode = 0;
                 peer.customMode = heartbeat.custom_mode;
                 peer.flightMode = heartbeat.base_mode & MAV_MODE_FLAG_CUSTOM_MODE_ENABLED ? modeName(peer) : "Unknown";
@@ -427,6 +495,8 @@ void VehicleLink::receive() {
                     endInsertRows();
                     requestTelemetry(peer);
                     sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_AUTOPILOT_VERSION);
+                    sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_STATUSTEXT);
+                    sendCommand(peer, MAV_CMD_RUN_PREARM_CHECKS);
                     requestModes(peer);
                     structureChanged = true;
                 } else {
@@ -438,7 +508,15 @@ void VehicleLink::receive() {
                 // Only accept telemetry from the discovered flight controller endpoint/component.
                 if (message.compid != peer.componentId || datagram.senderAddress() != peer.address
                     || datagram.senderPort() != peer.port) continue;
-                if (message.msgid == MAVLINK_MSG_ID_PARAM_VALUE) {
+                if (message.msgid == MAVLINK_MSG_ID_STATUSTEXT) {
+                    receiveStatusText(peer,message);
+                } else if (message.msgid == MAVLINK_MSG_ID_SYS_STATUS) {
+                    mavlink_sys_status_t state{};
+                    mavlink_msg_sys_status_decode(&message,&state);
+                    if (peer.preArmError && (state.onboard_control_sensors_present & MAV_SYS_STATUS_PREARM_CHECK)
+                        && (state.onboard_control_sensors_enabled & MAV_SYS_STATUS_PREARM_CHECK)
+                        && (state.onboard_control_sensors_health & MAV_SYS_STATUS_PREARM_CHECK)) clearVehicleError(peer);
+                } else if (message.msgid == MAVLINK_MSG_ID_PARAM_VALUE) {
                     receiveParameter(peer, message);
                 } else if (message.msgid == MAVLINK_MSG_ID_AUTOPILOT_VERSION) {
                     mavlink_autopilot_version_t version{};
@@ -491,17 +569,23 @@ void VehicleLink::receive() {
                         || (ack.target_component && ack.target_component != MAV_COMP_ID_MISSIONPLANNER)) continue;
                     if (ack.result == MAV_RESULT_ACCEPTED || ack.result == MAV_RESULT_IN_PROGRESS) {
                         if (ack.command == MAV_CMD_MISSION_START && ack.result == MAV_RESULT_ACCEPTED) {
-                            finishCommand(peer, "Mission start accepted.");
+                            finishCommand(peer, "Mission started.");
                             continue;
                         }
                         peer.commandStatus = ack.result == MAV_RESULT_ACCEPTED
-                            ? "Accepted; waiting for vehicle state…" : "Vehicle request in progress…";
+                            ? "Accepted…" : "In progress…";
                         if (ack.command == MAV_CMD_NAV_TAKEOFF) peer.commandDeadline = m_clock.elapsed() + 60000;
                         if (ack.result == MAV_RESULT_IN_PROGRESS) peer.commandDeadline = m_clock.elapsed() + 15000;
                         emit dataChanged(index(row),index(row),{CommandStatusRole});
                         if (peer.pendingCommand == MAV_CMD_DO_SET_STANDARD_MODE)
                             sendCommand(peer,MAV_CMD_REQUEST_MESSAGE,MAVLINK_MSG_ID_CURRENT_MODE);
-                    } else finishCommand(peer,commandResult(ack.result) + ".");
+                    } else {
+                        const QString action = ack.command == MAV_CMD_COMPONENT_ARM_DISARM ? (peer.desiredArmed ? "Arm" : "Disarm")
+                            : ack.command == MAV_CMD_NAV_TAKEOFF ? "Takeoff" : ack.command == MAV_CMD_MISSION_START ? "Mission" : "Mode";
+                        finishCommand(peer,action + ": " + commandResult(ack.result) + ".",true);
+                        if (ack.command == MAV_CMD_COMPONENT_ARM_DISARM && peer.desiredArmed)
+                            sendCommand(peer,MAV_CMD_RUN_PREARM_CHECKS);
+                    }
                 } else if (message.msgid == MAVLINK_MSG_ID_AVAILABLE_MODES) {
                     mavlink_available_modes_t mode{};
                     mavlink_msg_available_modes_decode(&message,&mode);
@@ -595,7 +679,7 @@ void VehicleLink::tick() {
     for (auto &peer : m_peers) {
         send(message,peer);
         if (peer.pendingCommand && m_clock.elapsed() >= peer.commandDeadline)
-            finishCommand(peer,"No state confirmation received; request timed out.");
+            finishCommand(peer,"Command timed out.",true);
         if (!reportedModesComplete(peer) && peer.modeRequests < 3
             && m_clock.elapsed() - peer.modesRequestedAt > 3000) requestModes(peer);
     }

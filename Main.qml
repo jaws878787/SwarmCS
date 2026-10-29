@@ -81,6 +81,7 @@ ApplicationWindow {
             window.mapCenter = QtPositioning.coordinate(latitude, longitude)
         }
         function onNotice(message) { window.noticeText = message; noticeTimer.restart() }
+        function onChanged() { if (!vehicleLink.listening) { window.noticeText = ""; noticeTimer.stop() } }
     }
     Timer { id: noticeTimer; interval: 6500; onTriggered: window.noticeText = "" }
     header: ToolBar {
@@ -94,7 +95,8 @@ ApplicationWindow {
             Label { text: "SWARMCS"; color: "#f2f6f8"; font.pixelSize: 19; font.bold: true; font.letterSpacing: 2 }
             Rectangle { width: 1; height: 24; color: "#34414d" }
             Label {
-                text: vehicleLink.status + (vehicleLink.searching ? ".".repeat(window.searchDots) : "")
+                text: window.noticeText || (vehicleLink.status + (vehicleLink.searching ? ".".repeat(window.searchDots) : ""))
+                textFormat: Text.PlainText
                 color: "#b6c6d3"
                 font.pixelSize: 13
                 elide: Text.ElideRight
@@ -187,18 +189,6 @@ ApplicationWindow {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: Math.min(255, window.width * 0.42)
-    }
-    Rectangle {
-        visible: window.noticeText.length > 0
-        anchors.top: parent.top
-        anchors.topMargin: 12
-        anchors.horizontalCenter: mapLoader.horizontalCenter
-        width: Math.min(460, mapLoader.width - 24)
-        height: noticeLabel.implicitHeight + 24
-        radius: 6
-        color: "#ee17242f"
-        border.color: "#466372"
-        Label { id: noticeLabel; anchors.fill: parent; anchors.margins: 12; text: window.noticeText; textFormat: Text.PlainText; wrapMode: Text.WordWrap }
     }
     Button {
         id: mapTypeButton
