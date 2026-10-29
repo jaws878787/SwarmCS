@@ -170,6 +170,7 @@ ApplicationWindow {
         Label { id: noticeLabel; anchors.fill: parent; anchors.margins: 12; text: window.noticeText; textFormat: Text.PlainText; wrapMode: Text.WordWrap }
     }
     Button {
+        id: mapTypeButton
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 20
@@ -182,9 +183,9 @@ ApplicationWindow {
     Rectangle {
         anchors.right: parent.right
         anchors.rightMargin: 20
-        anchors.verticalCenter: parent.verticalCenter
+        y: mapTypeButton.y * 0.05
         width: 58
-        height: Math.min(340, parent.height - 120)
+        height: mapTypeButton.y * 0.9
         radius: 8
         color: "#ee17242f"
         border.color: "#466372"
@@ -194,12 +195,11 @@ ApplicationWindow {
             spacing: 4
             Label {
                 text: window.zoomStep
-                font.pixelSize: 22
+                font.pixelSize: 14
                 font.bold: true
                 Layout.alignment: Qt.AlignHCenter
                 Accessible.name: "Selected zoom level " + text
             }
-            Label { text: "1"; color: "#a8bac8"; font.pixelSize: 10; Layout.alignment: Qt.AlignHCenter }
             Slider {
                 id: zoomSlider
                 orientation: Qt.Vertical
@@ -229,7 +229,6 @@ ApplicationWindow {
                     }
                 }
             }
-            Label { text: "20"; color: "#a8bac8"; font.pixelSize: 10; Layout.alignment: Qt.AlignHCenter }
         }
     }
     Dialog {

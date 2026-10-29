@@ -69,6 +69,7 @@ private:
         quint8 vehicleType = MAV_TYPE_QUADROTOR;
         bool armed = false;
         QString flightMode;
+        QString firmwareVersion;
         quint32 customMode = 0;
         quint8 standardMode = 0;
         double latitude = std::numeric_limits<double>::quiet_NaN();

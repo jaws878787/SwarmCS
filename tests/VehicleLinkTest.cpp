@@ -3,6 +3,7 @@
 #include <QAbstractItemModelTester>
 #include <QTemporaryDir>
 #include <cmath>
+#include <algorithm>
 #include <QNetworkDatagram>
 
 namespace {
@@ -49,6 +50,30 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void firmwareVersion() {
+        VehicleLink link(nullptr, settingsFile(), 0);
+        QUdpSocket vehicle;
+        QVERIFY(vehicle.bind(QHostAddress::LocalHost, 0));
+        link.toggle();
+        heartbeat(vehicle, link, 1);
+        QTRY_COMPARE(link.count(), 1);
+        const auto commands = readCommands(vehicle);
+        QVERIFY(std::any_of(commands.cbegin(), commands.cend(), [](const auto &command) {
+            return command.command == MAV_CMD_REQUEST_MESSAGE
+                && command.param1 == MAVLINK_MSG_ID_AUTOPILOT_VERSION;
+        }));
+        mavlink_autopilot_version_t version{};
+        version.flight_sw_version = (4u << 24) | (6u << 16) | (3u << 8) | 255u;
+        mavlink_message_t message{};
+        mavlink_msg_autopilot_version_encode(1, MAV_COMP_ID_AUTOPILOT1, &message, &version);
+        QUdpSocket otherEndpoint;
+        QVERIFY(otherEndpoint.bind(QHostAddress::LocalHost, 0));
+        sendPacket(otherEndpoint, link, message);
+        QTest::qWait(70);
+        QCOMPARE(link.data(link.index(0), VehicleLink::FirmwareRole).toString(), QString("ArduCopter"));
+        sendPacket(vehicle, link, message);
+        QTRY_COMPARE(link.data(link.index(0), VehicleLink::FirmwareRole).toString(), QString("ArduCopter 4.6.3"));
+    }
     void discovery() {
         VehicleLink link(nullptr, settingsFile(), 0);
         QAbstractItemModelTester tester(&link, QAbstractItemModelTester::FailureReportingMode::QtTest);

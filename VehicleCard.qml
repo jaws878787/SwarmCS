@@ -59,7 +59,7 @@ Rectangle {
                 onClicked: card.settingsRequested(card.systemId)
             }
         }
-        Label { text: card.firmware + " · #" + card.systemId; color: "#879eae"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
+        Label { text: card.firmware; color: "#879eae"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true; Layout.topMargin: -5 }
         RowLayout {
             Layout.fillWidth: true
             Layout.topMargin: 2

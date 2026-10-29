@@ -49,7 +49,10 @@ QVariant VehicleLink::data(const QModelIndex &index, int role) const {
     switch (role) {
     case SystemIdRole: return peer.systemId;
     case VehicleNameRole: return nameForSystem(peer.systemId);
-    case FirmwareRole: return peer.autopilot == MAV_AUTOPILOT_PX4 ? "PX4" : isPlane(peer) ? "ArduPlane" : "ArduCopter";
+    case FirmwareRole: {
+        const QString name = peer.autopilot == MAV_AUTOPILOT_PX4 ? "PX4" : isPlane(peer) ? "ArduPlane" : "ArduCopter";
+        return peer.firmwareVersion.isEmpty() ? name : name + " " + peer.firmwareVersion;
+    }
     case ArmedRole: return peer.armed;
     case FlightModeRole: return peer.flightMode;
     case AltitudeRole: return peer.altitudeTime >= 0 && m_clock.elapsed() - peer.altitudeTime <= 5000
@@ -406,6 +409,7 @@ void VehicleLink::receive() {
                 if (added) {
                     endInsertRows();
                     requestTelemetry(peer);
+                    sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_AUTOPILOT_VERSION);
                     requestModes(peer);
                     structureChanged = true;
                 } else {
@@ -417,7 +421,17 @@ void VehicleLink::receive() {
                 // Only accept telemetry from the discovered flight controller endpoint/component.
                 if (message.compid != peer.componentId || datagram.senderAddress() != peer.address
                     || datagram.senderPort() != peer.port) continue;
-                if (message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {
+                if (message.msgid == MAVLINK_MSG_ID_AUTOPILOT_VERSION) {
+                    mavlink_autopilot_version_t version{};
+                    mavlink_msg_autopilot_version_decode(&message, &version);
+                    if (version.flight_sw_version != 0) {
+                        peer.firmwareVersion = QString("%1.%2.%3")
+                            .arg((version.flight_sw_version >> 24) & 0xff)
+                            .arg((version.flight_sw_version >> 16) & 0xff)
+                            .arg((version.flight_sw_version >> 8) & 0xff);
+                        emit dataChanged(index(row), index(row), {FirmwareRole});
+                    }
+                } else if (message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {
                     mavlink_global_position_int_t position{};
                     mavlink_msg_global_position_int_decode(&message, &position);
                     const double latitude = position.lat / 1e7, longitude = position.lon / 1e7;
