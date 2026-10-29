@@ -18,7 +18,7 @@ void VehicleLink::toggle() {
     } else if (!m_socket.bind(QHostAddress::AnyIPv4, 14550, QAbstractSocket::DontShareAddress)) {
         m_status = "Cannot listen on UDP 14550: " + m_socket.errorString();
     } else {
-        m_status = "Searching on UDP 14550…";
+        m_status = "Searching for UDP on 14550";
         m_timer.start();
     }
     emit changed();
@@ -74,6 +74,6 @@ void VehicleLink::updateStatus() {
     QStringList names;
     for (const auto &peer : m_peers) names.append(peer.name);
     names.sort();
-    const auto next = names.isEmpty() ? QString("Searching on UDP 14550…") : names.join("   |   ");
+    const auto next = names.isEmpty() ? QString("Searching for UDP on 14550") : names.join("   |   ");
     if (m_status != next) { m_status = next; emit changed(); }
 }

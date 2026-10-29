@@ -10,10 +10,12 @@ class VehicleLink final : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool listening READ listening NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
+    Q_PROPERTY(bool searching READ searching NOTIFY changed)
 public:
     explicit VehicleLink(QObject *parent = nullptr);
     bool listening() const { return m_socket.state() == QAbstractSocket::BoundState; }
     QString status() const { return m_status; }
+    bool searching() const { return listening() && m_peers.isEmpty(); }
     Q_INVOKABLE void toggle();
 signals:
     void changed();

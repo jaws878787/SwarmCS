@@ -2,7 +2,11 @@
 
 C++ ground control station for ArduPilot and PX4 multicopters.
 
-The first milestone provides a full-window OpenStreetMap map, pan/zoom, and a top Connect button. Connect binds IPv4 UDP port 14550 and discovers multicopters from valid MAVLink 1/2 heartbeats. Known vehicles receive a GCS heartbeat once per second; they expire after five seconds without a heartbeat. Disconnect closes the socket. Bind failures appear in the top bar.
+The map defaults to Esri World Imagery satellite tiles. The bottom-right button switches between satellite and OpenStreetMap street tiles while preserving center and zoom. Each layer uses a separate local tile cache. Maps require internet access and retain provider attribution.
+
+The map initially centers on the computer's location when available through Qt Positioning or the Windows location service. Without a position or permission it keeps the Indianapolis fallback. A first fix centers once; manually moving the map prevents a late fix from interrupting navigation. The Windows fallback reads available location reports for up to 15 seconds without changing system privacy settings.
+
+The top gear opens a preview of connection options; those fields do not change the connection behavior yet. Connect binds IPv4 UDP port 14550 and discovers multicopters from valid MAVLink 1/2 heartbeats. While searching, the status cycles through zero to three dots. Known vehicles receive a GCS heartbeat once per second; they expire after five seconds without a heartbeat. Disconnect closes the socket. Bind failures appear in the top bar.
 
 ## Build
 
