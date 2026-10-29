@@ -1,0 +1,15 @@
+name: Build and test
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          modules: 'qtlocation qtpositioning'
+          cache: true
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure

@@ -1,0 +1,8 @@
+/build*/
+/.tools/
+/aqtinstall.log
+/.qt/
+/.idea/
+/.vscode/
+*.user
+CMakeUserPresets.json
