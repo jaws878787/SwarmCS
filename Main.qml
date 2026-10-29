@@ -26,6 +26,10 @@ ApplicationWindow {
     palette.buttonText: "#e5edf3"
     palette.highlight: "#39b6a7"
     palette.highlightedText: "#071b1b"
+    palette.light: "#2c4655"
+    palette.midlight: "#365969"
+    palette.dark: "#304653"
+    palette.placeholderText: "#7f97a6"
     Timer {
         interval: 400
         repeat: true
