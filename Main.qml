@@ -25,6 +25,7 @@ ApplicationWindow {
     palette.button: "#283b49"
     palette.buttonText: "#e5edf3"
     palette.highlight: "#39b6a7"
+    palette.highlightedText: "#071b1b"
     Timer {
         interval: 400
         repeat: true
@@ -115,8 +116,18 @@ ApplicationWindow {
     Component { id: streetView; FlightMap { viewState: window; plugin: streetTiles } }
     Loader {
         id: mapLoader
-        anchors.fill: parent
+        anchors.left: vehicleTree.right
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         sourceComponent: window.satellite ? satelliteView : streetView
+    }
+    VehicleTree {
+        id: vehicleTree
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: Math.min(332, window.width * 0.42)
     }
     Button {
         anchors.right: parent.right

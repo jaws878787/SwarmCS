@@ -26,7 +26,11 @@ Run the UDP integration tests with `ctest --test-dir build -C Debug --output-on-
 
 Configure ArduPilot SITL, PX4 SITL, or your telemetry router to send MAVLink UDP to this computer's IP on port **14550**, then click **Connect**. UDP discovery listens for incoming traffic; it does not scan network addresses. Permit incoming UDP 14550 through the firewall, and close any other GCS using that port. The map needs internet access for tiles; OpenStreetMap attribution remains visible.
 
-This milestone discovers vehicles only. Flight commands, arming, mission planning, position markers, and connection settings will be added separately. Signed MAVLink authentication is not configured yet. No vehicle commands are sent.
+Connected vehicles appear in the left Vehicles tree, initially stacked under Ungrouped. Each card shows its name, firmware type, armed state, active flight mode, altitude relative to home (metres), and horizontal ground speed labelled Velocity (m/s). Missing or stale telemetry displays a dash. SwarmCS requests position and ground-speed messages at 2 Hz when a vehicle is discovered.
+
+Right-click a vehicle to rename it or use the Add to group submenu to choose/create a group. Names, groups, and memberships are saved locally with Qt settings; vehicle identity uses the MAVLink system ID, which must be unique across connected vehicles. Right-click the Vehicles title to clear all saved vehicle names, including offline vehicles, and restore the default Vehicle N names. Group assignments remain intact.
+
+Flight commands, arming, mission planning, position markers, and connection settings will be added separately. Signed MAVLink authentication is not configured yet. The app only sends GCS heartbeats and telemetry interval requests; it does not arm vehicles or change flight modes.
 
 ## Local three-vehicle SITL
 
