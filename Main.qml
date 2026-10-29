@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtLocation
 import QtPositioning
+import QtCore
 
 ApplicationWindow {
     id: window
@@ -15,7 +16,18 @@ ApplicationWindow {
     color: "#101820"
     property bool satellite: true
     property var mapCenter: QtPositioning.coordinate(39.7684, -86.1581)
-    property real mapZoom: 12
+    property real mapZoom: 21 - Math.max(1, Math.min(20, mapSettings.zoomStep))
+    readonly property int zoomStep: Math.max(1, Math.min(20, Math.round(21 - mapZoom)))
+    function selectZoom(step) {
+        autoCenterAllowed = false
+        mapSettings.zoomStep = Math.max(1, Math.min(20, Math.round(step)))
+        mapZoom = 21 - mapSettings.zoomStep
+    }
+    Settings {
+        id: mapSettings
+        category: "Map"
+        property int zoomStep: 5
+    }
     property bool autoCenterAllowed: true
     property int searchDots: 0
     property int selectedSystemId: 0
@@ -67,7 +79,6 @@ ApplicationWindow {
             window.selectedSystemId = systemId
             window.autoCenterAllowed = false
             window.mapCenter = QtPositioning.coordinate(latitude, longitude)
-            window.mapZoom = Math.max(window.mapZoom, 17)
         }
         function onNotice(message) { window.noticeText = message; noticeTimer.restart() }
     }
@@ -167,6 +178,59 @@ ApplicationWindow {
         implicitWidth: 126
         implicitHeight: 42
         onClicked: window.satellite = !window.satellite
+    }
+    Rectangle {
+        anchors.right: parent.right
+        anchors.rightMargin: 20
+        anchors.verticalCenter: parent.verticalCenter
+        width: 58
+        height: Math.min(340, parent.height - 120)
+        radius: 8
+        color: "#ee17242f"
+        border.color: "#466372"
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 8
+            spacing: 4
+            Label {
+                text: window.zoomStep
+                font.pixelSize: 22
+                font.bold: true
+                Layout.alignment: Qt.AlignHCenter
+                Accessible.name: "Selected zoom level " + text
+            }
+            Label { text: "1"; color: "#a8bac8"; font.pixelSize: 10; Layout.alignment: Qt.AlignHCenter }
+            Slider {
+                id: zoomSlider
+                orientation: Qt.Vertical
+                from: 20
+                to: 1
+                stepSize: 1
+                snapMode: Slider.SnapAlways
+                value: window.zoomStep
+                Layout.fillHeight: true
+                Layout.alignment: Qt.AlignHCenter
+                Accessible.name: "Map zoom level"
+                onMoved: window.selectZoom(value)
+                background: Item {
+                    implicitWidth: 30
+                    implicitHeight: 220
+                    Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: zoomSlider.topPadding + zoomSlider.handle.height / 2; width: 3; height: zoomSlider.availableHeight - zoomSlider.handle.height; radius: 1; color: "#466372" }
+                    Repeater {
+                        model: 20
+                        Rectangle {
+                            required property int index
+                            width: 11
+                            height: 1
+                            color: "#7f97a6"
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: zoomSlider.topPadding + zoomSlider.handle.height / 2 + index / 19 * (zoomSlider.availableHeight - zoomSlider.handle.height)
+                        }
+                    }
+                }
+            }
+            Label { text: "20"; color: "#a8bac8"; font.pixelSize: 10; Layout.alignment: Qt.AlignHCenter }
+        }
     }
     Dialog {
         id: connectionSettings

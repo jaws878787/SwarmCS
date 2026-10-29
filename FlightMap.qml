@@ -11,7 +11,6 @@ Map {
     zoomLevel: viewState.mapZoom
     copyrightsVisible: true
     onCenterChanged: { if (viewState) viewState.mapCenter = center }
-    onZoomLevelChanged: { if (viewState) viewState.mapZoom = zoomLevel }
     MapItemView {
         model: vehicleLink
         delegate: MapQuickItem {
@@ -58,24 +57,35 @@ Map {
         onTranslationChanged: function(delta) { map.pan(-delta.x, -delta.y) }
     }
     WheelHandler {
+        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+        property real accumulatedSteps: 0
         onWheel: function(event) {
             map.viewState.autoCenterAllowed = false
             const coordinate = map.toCoordinate(Qt.point(event.x, event.y), false)
-            map.zoomLevel = Math.max(map.minimumZoomLevel, Math.min(map.maximumZoomLevel, map.zoomLevel + event.angleDelta.y / 120))
+            accumulatedSteps += event.angleDelta.y !== 0 ? event.angleDelta.y / 120 : event.pixelDelta.y / 100
+            const steps = Math.trunc(accumulatedSteps)
+            if (steps === 0) return
+            accumulatedSteps -= steps
+            map.viewState.selectZoom(map.viewState.zoomStep - steps)
             map.alignCoordinateToPoint(coordinate, Qt.point(event.x, event.y))
+            event.accepted = true
         }
     }
     PinchHandler {
         target: null
+        acceptedDevices: PointerDevice.TouchPad | PointerDevice.TouchScreen
+        property real gestureZoom: 0
         property var startCoordinate
         onActiveChanged: {
             if (active) {
                 map.viewState.autoCenterAllowed = false
                 startCoordinate = map.toCoordinate(centroid.position, false)
+                gestureZoom = map.viewState.mapZoom
             }
         }
         onScaleChanged: function(delta) {
-            map.zoomLevel += Math.log2(delta)
+            gestureZoom = Math.max(1, Math.min(20, gestureZoom + Math.log2(delta)))
+            map.viewState.selectZoom(21 - gestureZoom)
             map.alignCoordinateToPoint(startCoordinate, centroid.position)
         }
     }
