@@ -213,6 +213,10 @@ void VehicleLink::requestModes(Peer &peer) {
 
 void VehicleLink::centerVehicle(int systemId) {
     const int row = rowForSystem(systemId);
+    if (row < 0) { emit notice("Vehicle disconnected."); return; }
+    m_selectedSystemId = systemId;
+    m_selectedGroup.clear();
+    emit selectionChanged();
     if (row < 0 || !positionValid(m_peers[row])) {
         emit notice(nameForSystem(systemId) + ": position is not available yet.");
         return;
@@ -286,6 +290,7 @@ void VehicleLink::finishCommand(Peer &peer, const QString &message, bool error) 
     const auto command = peer.pendingCommand;
     peer.pendingCommand = 0;
     peer.queuedTakeoff = std::numeric_limits<double>::quiet_NaN();
+    peer.missionTakeoff = false;
     peer.commandStatus = message;
     const int row = rowForSystem(peer.systemId);
     emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
@@ -300,14 +305,21 @@ void VehicleLink::finishCommand(Peer &peer, const QString &message, bool error) 
 }
 
 void VehicleLink::confirmState(Peer &peer) {
-    if (peer.pendingCommand == MAV_CMD_COMPONENT_ARM_DISARM && peer.armed == peer.desiredArmed)
+    if (peer.pendingCommand == MAV_CMD_COMPONENT_ARM_DISARM && peer.armed == peer.desiredArmed) {
+        const double queued = peer.queuedTakeoff;
+        const bool mission = peer.missionTakeoff;
         finishCommand(peer,peer.armed ? "Armed." : "Disarmed.");
+        if (std::isfinite(queued)) peer.missionTakeoff = mission;
+        if (std::isfinite(queued) && !advanceTakeoff(peer,queued)) failVehicle(peer,"Takeoff cancelled.");
+    }
     else if ((peer.pendingCommand == MAV_CMD_DO_SET_MODE && peer.customMode == peer.desiredMode)
         || (peer.pendingCommand == MAV_CMD_DO_SET_STANDARD_MODE && peer.standardMode == peer.desiredStandardMode))
     {
         const double queued = peer.queuedTakeoff;
+        const bool mission = peer.missionTakeoff;
         finishCommand(peer,"Mode: " + peer.flightMode + ".");
-        if (std::isfinite(queued) && !sendTakeoff(peer,queued))
+        if (std::isfinite(queued)) peer.missionTakeoff = mission;
+        if (std::isfinite(queued) && !advanceTakeoff(peer,queued))
             failVehicle(peer,"Takeoff cancelled.");
     }
     else if (peer.pendingCommand == MAV_CMD_NAV_TAKEOFF && peer.armed && peer.altitudeTime >= 0
@@ -435,6 +447,9 @@ void VehicleLink::toggle() {
         m_socket.close();
         beginResetModel();
         m_peers.clear();
+        m_selectedSystemId = 0;
+        m_selectedGroup.clear();
+        emit selectionChanged();
         endResetModel();
         m_status = "Disconnected";
         emit groupsChanged();
@@ -497,6 +512,12 @@ void VehicleLink::receive() {
                     sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_AUTOPILOT_VERSION);
                     sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_STATUSTEXT);
                     sendCommand(peer, MAV_CMD_RUN_PREARM_CHECKS);
+                    mavlink_message_t missionRequest{};
+                    mavlink_status_t missionStatus{};
+                    missionStatus.current_tx_seq = m_sequence++;
+                    mavlink_msg_mission_request_list_pack_status(255,MAV_COMP_ID_MISSIONPLANNER,&missionStatus,&missionRequest,
+                        peer.systemId,peer.componentId,MAV_MISSION_TYPE_MISSION);
+                    send(missionRequest,peer);
                     requestModes(peer);
                     structureChanged = true;
                 } else {
@@ -508,7 +529,26 @@ void VehicleLink::receive() {
                 // Only accept telemetry from the discovered flight controller endpoint/component.
                 if (message.compid != peer.componentId || datagram.senderAddress() != peer.address
                     || datagram.senderPort() != peer.port) continue;
-                if (message.msgid == MAVLINK_MSG_ID_STATUSTEXT) {
+                if (message.msgid == MAVLINK_MSG_ID_MISSION_COUNT) {
+                    mavlink_mission_count_t count{};
+                    mavlink_msg_mission_count_decode(&message,&count);
+                    if (count.mission_type == MAV_MISSION_TYPE_MISSION && (!count.target_system || count.target_system == 255)
+                        && (!count.target_component || count.target_component == MAV_COMP_ID_MISSIONPLANNER)) {
+                        peer.missionCount = count.count;
+                        mavlink_message_t reply{};
+                        mavlink_status_t tx{};
+                        tx.current_tx_seq = m_sequence++;
+                        mavlink_msg_mission_ack_pack_status(255,MAV_COMP_ID_MISSIONPLANNER,&tx,&reply,
+                            peer.systemId,peer.componentId,MAV_MISSION_ACCEPTED,MAV_MISSION_TYPE_MISSION,0);
+                        send(reply,peer);
+                    }
+                } else if (message.msgid == MAVLINK_MSG_ID_MISSION_CURRENT) {
+                    mavlink_mission_current_t current{};
+                    mavlink_msg_mission_current_decode(&message,&current);
+                    peer.missionState = current.mission_state;
+                    if (current.mission_state == MISSION_STATE_NO_MISSION) peer.missionCount = 0;
+                    else if (current.total && current.total != UINT16_MAX) peer.missionCount = current.total;
+                } else if (message.msgid == MAVLINK_MSG_ID_STATUSTEXT) {
                     receiveStatusText(peer,message);
                 } else if (message.msgid == MAVLINK_MSG_ID_SYS_STATUS) {
                     mavlink_sys_status_t state{};
@@ -572,6 +612,10 @@ void VehicleLink::receive() {
                             finishCommand(peer, "Mission started.");
                             continue;
                         }
+                        if (ack.command == MAV_CMD_DO_REPOSITION && ack.result == MAV_RESULT_ACCEPTED) {
+                            finishCommand(peer,"Go Here accepted.");
+                            continue;
+                        }
                         peer.commandStatus = ack.result == MAV_RESULT_ACCEPTED
                             ? "Accepted…" : "In progress…";
                         if (ack.command == MAV_CMD_NAV_TAKEOFF) peer.commandDeadline = m_clock.elapsed() + 60000;
@@ -581,7 +625,8 @@ void VehicleLink::receive() {
                             sendCommand(peer,MAV_CMD_REQUEST_MESSAGE,MAVLINK_MSG_ID_CURRENT_MODE);
                     } else {
                         const QString action = ack.command == MAV_CMD_COMPONENT_ARM_DISARM ? (peer.desiredArmed ? "Arm" : "Disarm")
-                            : ack.command == MAV_CMD_NAV_TAKEOFF ? "Takeoff" : ack.command == MAV_CMD_MISSION_START ? "Mission" : "Mode";
+                            : ack.command == MAV_CMD_NAV_TAKEOFF ? "Takeoff" : ack.command == MAV_CMD_DO_REPOSITION ? "Go Here"
+                            : ack.command == MAV_CMD_MISSION_START ? "Mission" : "Mode";
                         finishCommand(peer,action + ": " + commandResult(ack.result) + ".",true);
                         if (ack.command == MAV_CMD_COMPONENT_ARM_DISARM && peer.desiredArmed)
                             sendCommand(peer,MAV_CMD_RUN_PREARM_CHECKS);
@@ -663,6 +708,7 @@ void VehicleLink::tick() {
     bool removed = false;
     for (int row = m_peers.size() - 1; row >= 0; --row) {
         if (m_clock.elapsed() - m_peers[row].lastSeen > 5000) {
+            if (m_selectedSystemId == m_peers[row].systemId) { m_selectedSystemId = 0; emit selectionChanged(); }
             if (m_peers[row].pendingCommand)
                 emit notice(nameForSystem(m_peers[row].systemId) + ": disconnected before state confirmation.");
             beginRemoveRows({}, row, row);

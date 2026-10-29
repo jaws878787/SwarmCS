@@ -30,7 +30,7 @@ ApplicationWindow {
     }
     property bool autoCenterAllowed: true
     property int searchDots: 0
-    property int selectedSystemId: 0
+    readonly property int selectedSystemId: vehicleLink.selectedSystemId
     property string noticeText: ""
     palette.window: "#17242f"
     palette.windowText: "#e5edf3"
@@ -76,9 +76,12 @@ ApplicationWindow {
     Connections {
         target: vehicleLink
         function onCenterRequested(systemId, latitude, longitude) {
-            window.selectedSystemId = systemId
             window.autoCenterAllowed = false
             window.mapCenter = QtPositioning.coordinate(latitude, longitude)
+        }
+        function onGroupCenterRequested(group) {
+            window.autoCenterAllowed = false
+            if (mapLoader.item) mapLoader.item.frameGroup(group)
         }
         function onNotice(message) { window.noticeText = message; noticeTimer.restart() }
         function onChanged() { if (!vehicleLink.listening) { window.noticeText = ""; noticeTimer.stop() } }

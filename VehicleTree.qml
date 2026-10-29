@@ -97,13 +97,53 @@ Rectangle {
                         text: (section.expanded ? "▾  " : "▸  ") + section.groupTitle
                               + "  (" + (vehicleLink.groupCounts[section.groupTitle] || 0) + ")"
                         Accessible.name: section.groupTitle + " vehicle group"
-                        onClicked: section.expanded = !section.expanded
+                        onClicked: vehicleLink.selectGroup(section.groupTitle)
                         TapHandler {
                             acceptedButtons: Qt.RightButton
                             onTapped: { tree.selectedGroup = section.groupTitle; groupActionsMenu.popup() }
                         }
-                        background: Rectangle { radius: 5; color: parent.hovered ? "#253945" : "#172832" }
-                        contentItem: Text { text: parent.text; color: "#a7bfcd"; font.pixelSize: 12; font.bold: true; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
+                        background: Rectangle {
+                            radius: 5
+                            color: vehicleLink.selectedGroup === section.groupTitle ? "#25413f" : parent.hovered ? "#253945" : "#172832"
+                            border.color: vehicleLink.selectedGroup === section.groupTitle ? "#66cbbb" : "transparent"
+                        }
+                        contentItem: RowLayout {
+                            spacing: 3
+                            ToolButton {
+                                text: section.expanded ? "▾" : "▸"
+                                implicitWidth: 22
+                                implicitHeight: 22
+                                padding: 0
+                                Accessible.name: (section.expanded ? "Collapse " : "Expand ") + section.groupTitle
+                                onClicked: section.expanded = !section.expanded
+                            }
+                            Label {
+                                text: section.groupTitle + "  (" + (vehicleLink.groupCounts[section.groupTitle] || 0) + ")"
+                                color: "#a7bfcd"
+                                font.pixelSize: 12
+                                font.bold: true
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                        }
+                    }
+                    Row {
+                        width: parent.width
+                        spacing: 3
+                        visible: (vehicleLink.groupCounts[section.groupTitle] || 0) > 0
+                        Repeater {
+                            model: [{name:"Takeoff",action:"takeoff"},{name:"Land",action:"land"},{name:"Start",action:"mission"},{name:"RTL",action:"rtl"}]
+                            delegate: Button {
+                                required property var modelData
+                                width: (section.width - 9) / 4
+                                height: 24
+                                padding: 2
+                                text: modelData.name
+                                font.pixelSize: 10
+                                Accessible.name: modelData.name + " group " + section.groupTitle
+                                onClicked: { vehicleLink.selectGroup(section.groupTitle); vehicleLink.groupAction(section.groupTitle, modelData.action) }
+                            }
+                        }
                     }
                     Repeater {
                         model: vehicleLink
@@ -135,6 +175,7 @@ Rectangle {
         MenuItem { text: "Arm all vehicles"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "arm") }
         MenuItem { text: "Disarm all vehicles"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "disarm") }
         MenuItem { text: "Takeoff"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "takeoff") }
+        MenuItem { text: "Land"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "land") }
         MenuSeparator {}
         MenuItem { text: "Start missions"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "mission") }
         MenuItem { text: "RTL"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "rtl") }
@@ -211,6 +252,11 @@ Rectangle {
             text: "Takeoff"
             enabled: tree.selectedVehicle.connected === true && !tree.selectedVehicle.commandPending
             onTriggered: vehicleLink.takeoff(tree.selectedSystemId)
+        }
+        MenuItem {
+            text: "Land"
+            enabled: tree.selectedVehicle.connected === true
+            onTriggered: vehicleLink.land(tree.selectedSystemId)
         }
         Menu {
             id: groupMenu

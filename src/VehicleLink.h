@@ -23,6 +23,8 @@ class VehicleLink final : public QAbstractListModel {
     Q_PROPERTY(bool parameterSaveBusy READ parameterSaveBusy NOTIFY parametersChanged)
     Q_PROPERTY(double takeoffAltitude READ takeoffAltitude WRITE setTakeoffAltitude NOTIFY takeoffSettingsChanged)
     Q_PROPERTY(QString takeoffUnit READ takeoffUnit NOTIFY takeoffSettingsChanged)
+    Q_PROPERTY(int selectedSystemId READ selectedSystemId NOTIFY selectionChanged)
+    Q_PROPERTY(QString selectedGroup READ selectedGroup NOTIFY selectionChanged)
 public:
     enum Role { SystemIdRole = Qt::UserRole + 1, VehicleNameRole, FirmwareRole,
                 ArmedRole, FlightModeRole, AltitudeRole, VelocityRole, VehicleGroupRole,
@@ -69,6 +71,12 @@ public:
     Q_INVOKABLE void setTakeoffAltitude(double value);
     Q_INVOKABLE void toggleTakeoffUnit();
     Q_INVOKABLE bool takeoff(int systemId);
+    Q_INVOKABLE bool land(int systemId);
+    Q_INVOKABLE bool goTo(int systemId, double latitude, double longitude);
+    Q_INVOKABLE void goToGroup(const QString &group, double latitude, double longitude);
+    Q_INVOKABLE void selectGroup(const QString &group);
+    int selectedSystemId() const { return m_selectedSystemId; }
+    QString selectedGroup() const { return m_selectedGroup; }
 signals:
     void changed();
     void groupsChanged();
@@ -80,6 +88,8 @@ signals:
     void operationReport(const QString &title, const QString &message);
     void parametersSaved(int sourceSystemId, const QStringList &confirmed);
     void takeoffSettingsChanged();
+    void selectionChanged();
+    void groupCenterRequested(const QString &group);
 private:
     struct Parameter { double value = 0; quint8 type = 0; int index = -1; };
     struct Peer {
@@ -130,7 +140,10 @@ private:
         quint8 statusTextSeverity = 0;
         qint64 statusTextTime = -1;
         double queuedTakeoff = std::numeric_limits<double>::quiet_NaN();
+        bool missionTakeoff = false;
         double takeoffTarget = std::numeric_limits<double>::quiet_NaN();
+        int missionCount = -1;
+        quint8 missionState = 0;
         double homeAltitude = std::numeric_limits<double>::quiet_NaN();
         double altitude = std::numeric_limits<double>::quiet_NaN();
         double velocity = std::numeric_limits<double>::quiet_NaN();
@@ -158,6 +171,7 @@ private:
     void tick();
     void updateStatus();
     bool sendTakeoff(Peer &peer, double altitude);
+    bool advanceTakeoff(Peer &peer, double altitude);
     void parameterTick();
     void receiveParameter(Peer &peer, const mavlink_message_t &message);
     void requestParameterList(Peer &peer);
@@ -198,5 +212,7 @@ private:
     QString m_velocityUnit = "kph";
     double m_takeoffMeters = 15.24;
     QString m_takeoffUnit = "ft";
+    int m_selectedSystemId = 0;
+    QString m_selectedGroup;
     QMap<int, QString> m_resolvedNames;
 };

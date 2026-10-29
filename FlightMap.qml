@@ -11,6 +11,23 @@ Map {
     zoomLevel: viewState.mapZoom
     copyrightsVisible: true
     onCenterChanged: { if (viewState) viewState.mapCenter = center }
+    property string pendingGroupFit: ""
+    function frameGroup(group) {
+        if (!mapReady) { pendingGroupFit = group; return }
+        const members = []
+        for (let i = 0; i < mapItems.length; ++i) {
+            const item = mapItems[i]
+            if (item.vehicleGroup === group && item.positionValid) members.push(item)
+        }
+        if (members.length === 0) return
+        fitViewportToMapItems(members)
+        const fitted = Math.max(1, Math.min(17, Math.floor(zoomLevel) - 1))
+        viewState.mapCenter = center
+        viewState.selectZoom(21 - fitted)
+        zoomLevel = Qt.binding(function() { return map.viewState.mapZoom })
+        pendingGroupFit = ""
+    }
+    onMapReadyChanged: { if (mapReady && pendingGroupFit.length > 0) frameGroup(pendingGroupFit) }
     MapItemView {
         model: vehicleLink
         delegate: MapQuickItem {
@@ -22,6 +39,7 @@ Map {
             required property double longitude
             required property double heading
             required property bool positionValid
+            required property string vehicleGroup
             visible: positionValid
             coordinate: positionValid ? QtPositioning.coordinate(latitude, longitude) : QtPositioning.coordinate()
             anchorPoint.x: markerContent.width / 2
@@ -36,7 +54,8 @@ Map {
                     width: 36
                     height: 36
                     kind: marker.iconId
-                    tint: map.viewState.selectedSystemId === marker.systemId ? "#ffca82" : "#66e0ca"
+                    tint: map.viewState.selectedSystemId === marker.systemId
+                          || (vehicleLink.selectedGroup.length > 0 && vehicleLink.selectedGroup === marker.vehicleGroup) ? "#ffca82" : "#66e0ca"
                     rotation: marker.heading
                 }
                 Rectangle {
@@ -48,6 +67,37 @@ Map {
                     color: "#e6101820"
                     Label { id: markerName; anchors.centerIn: parent; text: marker.vehicleName; textFormat: Text.PlainText; color: "#f3f7fa"; font.pixelSize: 11 }
                 }
+            }
+        }
+    }
+    TapHandler {
+        acceptedButtons: Qt.LeftButton
+        onTapped: function(eventPoint) {
+            const coordinate = map.toCoordinate(eventPoint.position, false)
+            if (!coordinate.isValid) return
+            goHereMenu.latitude = coordinate.latitude
+            goHereMenu.longitude = coordinate.longitude
+            goHereMenu.systemId = vehicleLink.selectedSystemId
+            goHereMenu.groupName = vehicleLink.selectedGroup
+            goHereMenu.targetName = goHereMenu.groupName.length > 0 ? goHereMenu.groupName
+                : (vehicleLink.vehicleDetails(goHereMenu.systemId).vehicleName || "Select a vehicle or group")
+            goHereMenu.popup()
+        }
+    }
+    Menu {
+        id: goHereMenu
+        popupType: Popup.Item
+        property double latitude
+        property double longitude
+        property int systemId: 0
+        property string groupName: ""
+        property string targetName: ""
+        MenuItem {
+            text: "Go Here · " + goHereMenu.targetName
+            enabled: goHereMenu.systemId > 0 || goHereMenu.groupName.length > 0
+            onTriggered: {
+                if (goHereMenu.groupName.length > 0) vehicleLink.goToGroup(goHereMenu.groupName,goHereMenu.latitude,goHereMenu.longitude)
+                else vehicleLink.goTo(goHereMenu.systemId,goHereMenu.latitude,goHereMenu.longitude)
             }
         }
     }

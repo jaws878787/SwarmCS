@@ -140,20 +140,31 @@ private slots:
         QVERIFY(copter.bind(QHostAddress::LocalHost,0));
         QVERIFY(px4.bind(QHostAddress::LocalHost,0));
         link.toggle();
-        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,false);
+        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,3,false);
         heartbeat(px4,link,2,MAV_AUTOPILOT_PX4,1u<<16,true);
         QTRY_COMPARE(link.count(),2);
         readCommands(copter); readCommands(px4);
-        QVERIFY(!link.takeoff(1));
+        mavlink_mission_count_t emptyMission{};
+        emptyMission.target_system = 255; emptyMission.target_component = MAV_COMP_ID_MISSIONPLANNER;
+        mavlink_message_t mission{};
+        mavlink_msg_mission_count_encode(1,MAV_COMP_ID_AUTOPILOT1,&mission,&emptyMission);
+        sendPacket(copter,link,mission);
+        QTest::qWait(70);
         QVERIFY(!link.takeoff(2)); // PX4 requires a fresh AMSL reference.
-        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,true);
-        QTRY_VERIFY(link.vehicleDetails(1).value("armed").toBool());
         QVERIFY(link.takeoff(1));
         auto commands = readCommands(copter);
         QCOMPARE(commands.size(),1);
         QCOMPARE(commands.first().command,quint16(MAV_CMD_DO_SET_MODE));
         QCOMPARE(commands.first().param2,4.0f);
         link.setTakeoffAltitude(100); // Queued takeoff retains the altitude captured on click.
+        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,4,false);
+        commands = readCommands(copter);
+        QCOMPARE(commands.size(),1);
+        QCOMPARE(commands.first().command,quint16(MAV_CMD_COMPONENT_ARM_DISARM));
+        QCOMPARE(commands.first().param1,1.0f);
+        QCOMPARE(commands.first().param2,0.0f);
+        acknowledge(copter,link,1,MAV_CMD_COMPONENT_ARM_DISARM,MAV_RESULT_ACCEPTED);
+        QVERIFY(readCommands(copter).isEmpty()); // An ACK alone must not trigger takeoff.
         heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,4,true);
         QTRY_VERIFY(copter.hasPendingDatagrams());
         bool found = false;
@@ -190,11 +201,131 @@ private slots:
         QCOMPARE(commands.first().command,quint16(MAV_CMD_NAV_TAKEOFF));
         QVERIFY(std::abs(commands.first().param7-220.48f) < 0.001f);
         QVERIFY(std::isnan(commands.first().param5));
+        emptyMission.count = 2;
+        mavlink_msg_mission_count_encode(1,MAV_COMP_ID_AUTOPILOT1,&mission,&emptyMission);
+        sendPacket(copter,link,mission);
         heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,3,true);
         QTRY_COMPARE(link.vehicleDetails(1).value("customMode").toUInt(),3u);
+        mavlink_mission_current_t current{};
+        current.mission_state = MISSION_STATE_ACTIVE; current.total = 2;
+        mavlink_msg_mission_current_encode(1,MAV_COMP_ID_AUTOPILOT1,&mission,&current);
+        sendPacket(copter,link,mission);
+        QTest::qWait(70);
         readCommands(copter);
-        QVERIFY(!link.takeoff(1));
+        QVERIFY(link.takeoff(1));
         QVERIFY(readCommands(copter).isEmpty()); // Mission altitude and execution remain untouched.
+    }
+    void rejectedTakeoffAndLandCancellation() {
+        VehicleLink link(nullptr,settingsFile(),0);
+        QUdpSocket vehicle;
+        QVERIFY(vehicle.bind(QHostAddress::LocalHost,0));
+        link.toggle();
+        heartbeat(vehicle,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,4,false);
+        QTRY_COMPARE(link.count(),1);
+        readCommands(vehicle);
+        QVERIFY(link.takeoff(1));
+        auto commands = readCommands(vehicle);
+        QCOMPARE(commands.size(),1);
+        QCOMPARE(commands.first().command,quint16(MAV_CMD_COMPONENT_ARM_DISARM));
+        acknowledge(vehicle,link,1,MAV_CMD_COMPONENT_ARM_DISARM,MAV_RESULT_DENIED);
+        QTRY_VERIFY(!link.vehicleDetails(1).value("commandPending").toBool());
+        readCommands(vehicle); // Diagnostic request after denial.
+        heartbeat(vehicle,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,4,true);
+        QVERIFY(readCommands(vehicle).isEmpty());
+        heartbeat(vehicle,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,false);
+        QTRY_VERIFY(!link.vehicleDetails(1).value("armed").toBool());
+        QVERIFY(link.takeoff(1));
+        readCommands(vehicle);
+        QVERIFY(link.land(1));
+        commands = readCommands(vehicle);
+        QCOMPARE(commands.size(),1);
+        QCOMPARE(commands.first().command,quint16(MAV_CMD_DO_SET_MODE));
+        QCOMPARE(commands.first().param2,9.0f);
+        heartbeat(vehicle,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,4,false); // Late Guided heartbeat cannot arm.
+        QVERIFY(readCommands(vehicle).isEmpty());
+        heartbeat(vehicle,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,9,false);
+        QTRY_VERIFY(!link.vehicleDetails(1).value("commandPending").toBool());
+    }
+    void missionTakeoffArmsWithoutOverridingAltitude() {
+        VehicleLink link(nullptr,settingsFile(),0);
+        QUdpSocket vehicle;
+        QVERIFY(vehicle.bind(QHostAddress::LocalHost,0));
+        link.toggle();
+        heartbeat(vehicle,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,3,false);
+        QTRY_COMPARE(link.count(),1);
+        readCommands(vehicle);
+        mavlink_mission_count_t count{};
+        count.target_system = 255; count.target_component = MAV_COMP_ID_MISSIONPLANNER; count.count = 3;
+        mavlink_message_t message{};
+        mavlink_msg_mission_count_encode(1,MAV_COMP_ID_AUTOPILOT1,&message,&count);
+        sendPacket(vehicle,link,message);
+        QTest::qWait(70);
+        QVERIFY(link.takeoff(1));
+        auto commands = readCommands(vehicle);
+        QCOMPARE(commands.size(),1);
+        QCOMPARE(commands.first().command,quint16(MAV_CMD_COMPONENT_ARM_DISARM));
+        QCOMPARE(commands.first().param2,0.0f);
+        heartbeat(vehicle,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,3,true);
+        commands = readCommands(vehicle);
+        QCOMPARE(commands.size(),1);
+        QCOMPARE(commands.first().command,quint16(MAV_CMD_MISSION_START));
+    }
+    void navigationAndSelection() {
+        VehicleLink link(nullptr,settingsFile(),0);
+        QUdpSocket copter, px4;
+        QVERIFY(copter.bind(QHostAddress::LocalHost,0));
+        QVERIFY(px4.bind(QHostAddress::LocalHost,0));
+        link.toggle();
+        heartbeat(copter,link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,4,true);
+        heartbeat(px4,link,2,MAV_AUTOPILOT_PX4,1u<<16,true);
+        QTRY_COMPARE(link.count(),2);
+        readCommands(copter); readCommands(px4);
+        for (int id : {1,2}) {
+            mavlink_global_position_int_t position{};
+            position.lat = 390000000 + id*1000; position.lon = -860000000;
+            position.relative_alt = id == 1 ? 10000 : 25000;
+            position.alt = 200000 + position.relative_alt;
+            mavlink_message_t message{};
+            mavlink_msg_global_position_int_encode(id,MAV_COMP_ID_AUTOPILOT1,&message,&position);
+            sendPacket(id == 1 ? copter : px4,link,message);
+        }
+        QTRY_VERIFY(link.vehicleDetails(2).value("positionValid").toBool());
+        QSignalSpy frame(&link,&VehicleLink::groupCenterRequested);
+        link.selectGroup("Ungrouped");
+        QCOMPARE(link.selectedGroup(),QString("Ungrouped"));
+        QCOMPARE(link.selectedSystemId(),0);
+        QCOMPARE(frame.size(),1);
+        link.centerVehicle(2);
+        QCOMPARE(link.selectedSystemId(),2);
+        QVERIFY(link.selectedGroup().isEmpty());
+        link.goToGroup("Ungrouped",39.5,-86.5);
+        QTest::qWait(70);
+        for (auto socket : {&copter,&px4}) {
+            bool found = false;
+            while (socket->hasPendingDatagrams()) {
+                const auto bytes = socket->receiveDatagram().data();
+                mavlink_message_t message{}, buffer{}; mavlink_status_t parser{}, status{};
+                for (auto byte : bytes) {
+                    if (mavlink_frame_char_buffer(&buffer,&parser,quint8(byte),&message,&status) != MAVLINK_FRAMING_OK
+                        || message.msgid != MAVLINK_MSG_ID_COMMAND_INT) continue;
+                    mavlink_command_int_t command{};
+                    mavlink_msg_command_int_decode(&message,&command);
+                    QCOMPARE(command.command,quint16(MAV_CMD_DO_REPOSITION));
+                    QCOMPARE(command.x,395000000); QCOMPARE(command.y,-865000000);
+                    QCOMPARE(command.param2,float(MAV_DO_REPOSITION_FLAGS_CHANGE_MODE));
+                    QCOMPARE(command.frame,quint8(socket == &copter ? MAV_FRAME_GLOBAL_RELATIVE_ALT : MAV_FRAME_GLOBAL));
+                    QCOMPARE(command.z,socket == &copter ? 10.0f : 225.0f);
+                    found = true;
+                }
+            }
+            QVERIFY(found);
+        }
+        QVERIFY(!link.goTo(1,std::numeric_limits<double>::quiet_NaN(),0));
+        link.groupAction("Ungrouped","land");
+        auto commands = readCommands(copter);
+        QCOMPARE(commands.size(),1); QCOMPARE(commands.first().param2,9.0f);
+        commands = readCommands(px4);
+        QCOMPARE(commands.size(),1); QCOMPARE(commands.first().param2,4.0f); QCOMPARE(commands.first().param3,6.0f);
     }
     void groupCommands() {
         VehicleLink link(nullptr, settingsFile(), 0);

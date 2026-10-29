@@ -22,8 +22,9 @@ Rectangle {
     Accessible.role: Accessible.ListItem
     Accessible.name: vehicleName + ", " + firmware + ", " + (armed ? "Armed" : "Disarmed") + ", " + flightMode
     radius: 6
-    color: hover.hovered ? "#223542" : "#1a2a36"
-    border.color: hover.hovered ? "#456273" : "#2b3f4d"
+    property bool selected: vehicleLink.selectedSystemId === systemId
+    color: selected ? "#25413f" : hover.hovered ? "#223542" : "#1a2a36"
+    border.color: selected ? "#66cbbb" : hover.hovered ? "#456273" : "#2b3f4d"
     HoverHandler { id: hover }
     MouseArea {
         anchors.fill: parent

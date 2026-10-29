@@ -55,11 +55,13 @@ void VehicleLink::groupAction(const QString &group, const QString &action, const
         bool success = false;
         if (action == "arm" || action == "disarm") success = setArmed(id, action == "arm");
         else if (action == "takeoff") success = takeoff(id);
+        else if (action == "land") success = land(id);
         else if (action == "mode" || action == "rtl") {
             const auto requested = action == "rtl" ? QString("rtl") : modeKey(mode);
             for (const auto &entry : availableModes(id)) {
                 const auto option = entry.toMap();
                 if (option.value("enabled").toBool() && modeKey(option.value("name").toString(),option.value("standardMode").toInt()) == requested) {
+                    if (action == "rtl" && peer.pendingCommand) finishCommand(peer,"Command replaced.");
                     success = setFlightMode(id, option.value("id").toUInt(), option.value("standardMode").toInt());
                     break;
                 }
@@ -79,7 +81,7 @@ void VehicleLink::groupAction(const QString &group, const QString &action, const
         if (success) ++sent;
         else skipped.append(item.value("name").toString());
     }
-    const QString label = action == "arm" ? "Arm" : action == "disarm" ? "Disarm" : action == "takeoff" ? "Takeoff"
+    const QString label = action == "arm" ? "Arm" : action == "disarm" ? "Disarm" : action == "takeoff" ? "Takeoff" : action == "land" ? "Land"
         : action == "mission" ? "Mission" : action == "rtl" ? "RTL" : "Mode";
     QString report = QString("%1 · %2: %3 requested").arg(group,label).arg(sent);
     if (!skipped.isEmpty()) report += QString(", %1 skipped").arg(skipped.size());
