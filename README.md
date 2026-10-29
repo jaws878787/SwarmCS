@@ -36,6 +36,12 @@ Right-click a vehicle for Arm/Disarm or the Add to group submenu. Names, icons, 
 
 Click a card's flight mode to choose another mode. SwarmCS queries the MAVLink available-modes service and uses its complete mode list when supported, otherwise displaying firmware defaults. Unsupported or non-selectable modes cannot be forced. Requests use the firmware's ArduPilot/PX4 mode encoding, and arm/disarm always leaves force flags unset. Pending commands are confirmed by heartbeat/current-mode telemetry; rejection and timeout messages appear over the map. Only commands selected by the user are sent; no automatic arming or mode changes occur.
 
+Right-click a group header to arm or disarm its connected vehicles, start their existing missions, request RTL, change their flight mode together, or open Parameters. Group mode choices include modes shared by the connected members, resolved to each vehicle's own mode encoding. Mission start requires already-armed vehicles and waits for command acknowledgement. Group commands are individual requests; vehicles can independently reject them.
+
+The Parameters popup initially selects the first connected group member. Its vehicle dropdown changes the viewed vehicle while preserving the search text and each vehicle's pending edits. Search filters parameter names as you type. Reload downloads a fresh table; edits remain pending until Save. Standard MAVLink numeric parameters are downloaded with missing-index retries; unsupported transport types remain read-only. Integer ranges and float-transport precision are checked before writes.
+
+Save sends the viewed vehicle's pending changes and waits for matching parameter-value echoes, retrying lost writes. **Save to Group** applies those same pending values to a snapshot of the group's connected vehicles. Each target's complete table is checked first; absent parameters and incompatible types/values are skipped, and disconnected or unresponsive targets are reported. A completion message lists skipped vehicles and parameters and any failed confirmations. Partial saves keep the relevant edits pending for retry. Parameters are stored by the flight controller; some may require a vehicle reboot to take effect. The implementation follows the [MAVLink parameter protocol](https://mavlink.io/en/services/parameter.html), including ArduPilot C-cast and PX4 bytewise encoding.
+
 Mission planning and functional connection settings will be added separately. Signed MAVLink authentication is not configured yet.
 
 ## Local three-vehicle SITL

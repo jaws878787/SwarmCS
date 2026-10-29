@@ -10,6 +10,8 @@ Rectangle {
     property var iconChoices: []
     property var modeEntries: []
     property bool iconsExpanded: false
+    property string selectedGroup: ""
+    property var groupModeEntries: []
     function refreshSelected() {
         if (selectedSystemId > 0) selectedVehicle = vehicleLink.vehicleDetails(selectedSystemId)
     }
@@ -35,10 +37,16 @@ Rectangle {
         function onRowsRemoved() { tree.refreshSelected() }
         function onModelReset() { tree.refreshSelected() }
         function onModeListChanged(systemId) {
+            if (groupModeDialog.visible) tree.groupModeEntries = vehicleLink.groupModes(tree.selectedGroup)
             if (systemId === tree.selectedSystemId) {
                 tree.refreshSelected()
                 if (modeDialog.visible) tree.modeEntries = vehicleLink.availableModes(systemId)
             }
+        }
+        function onOperationReport(title, message) {
+            resultDialog.title = title
+            resultText.text = message
+            resultDialog.open()
         }
     }
     function openVehicleMenu(systemId) {
@@ -90,6 +98,10 @@ Rectangle {
                               + "  (" + (vehicleLink.groupCounts[section.groupTitle] || 0) + ")"
                         Accessible.name: section.groupTitle + " vehicle group"
                         onClicked: section.expanded = !section.expanded
+                        TapHandler {
+                            acceptedButtons: Qt.RightButton
+                            onTapped: { tree.selectedGroup = section.groupTitle; groupActionsMenu.popup() }
+                        }
                         background: Rectangle { radius: 5; color: parent.hovered ? "#253945" : "#172832" }
                         contentItem: Text { text: parent.text; color: "#a7bfcd"; font.pixelSize: 12; font.bold: true; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
                     }
@@ -114,6 +126,69 @@ Rectangle {
                 wrapMode: Text.WordWrap
                 topPadding: 8
                 bottomPadding: 8
+            }
+        }
+    }
+    Menu {
+        id: groupActionsMenu
+        popupType: Popup.Item
+        MenuItem { text: "Arm all vehicles"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "arm") }
+        MenuItem { text: "Disarm all vehicles"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "disarm") }
+        MenuSeparator {}
+        MenuItem { text: "Start missions"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "mission") }
+        MenuItem { text: "RTL"; onTriggered: vehicleLink.groupAction(tree.selectedGroup, "rtl") }
+        MenuItem {
+            text: "Change flight mode…"
+            onTriggered: {
+                tree.groupModeEntries = vehicleLink.groupModes(tree.selectedGroup)
+                for (const vehicle of vehicleLink.groupVehicles(tree.selectedGroup)) vehicleLink.refreshModes(vehicle.systemId)
+                groupModeDialog.open()
+            }
+        }
+        MenuSeparator {}
+        MenuItem { text: "Parameters…"; onTriggered: parameterEditor.openGroup(tree.selectedGroup) }
+    }
+    ParameterEditor { id: parameterEditor }
+    Dialog {
+        id: resultDialog
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(660, parent.width - 32)
+        height: Math.min(420, parent.height - 48)
+        modal: true
+        standardButtons: Dialog.Ok
+        ScrollView {
+            id: resultScroll
+            anchors.fill: parent
+            clip: true
+            Label { id: resultText; width: resultScroll.availableWidth; textFormat: Text.PlainText; wrapMode: Text.WordWrap }
+        }
+    }
+    Dialog {
+        id: groupModeDialog
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(360, parent.width - 32)
+        height: Math.min(540, parent.height - 48)
+        modal: true
+        title: "Flight mode · " + tree.selectedGroup
+        standardButtons: Dialog.Close
+        ColumnLayout {
+            anchors.fill: parent
+            Label { text: "Modes available on every connected group member"; wrapMode: Text.WordWrap; Layout.fillWidth: true; color: "#91a9b9" }
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: tree.groupModeEntries
+                ScrollBar.vertical: ScrollBar {}
+                delegate: Button {
+                    required property var modelData
+                    width: ListView.view.width
+                    text: modelData.name
+                    onClicked: { groupModeDialog.close(); vehicleLink.groupAction(tree.selectedGroup, "mode", modelData.key) }
+                }
+                Label { anchors.centerIn: parent; visible: tree.groupModeEntries.length === 0; text: "No shared modes available" }
             }
         }
     }

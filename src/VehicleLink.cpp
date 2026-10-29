@@ -30,6 +30,9 @@ VehicleLink::VehicleLink(QObject *parent, const QString &settingsFile, quint16 p
     m_timer.setInterval(1000);
     connect(&m_socket, &QUdpSocket::readyRead, this, &VehicleLink::receive);
     connect(&m_timer, &QTimer::timeout, this, &VehicleLink::tick);
+    m_parameterTimer.setInterval(250);
+    connect(&m_parameterTimer, &QTimer::timeout, this, &VehicleLink::parameterTick);
+    m_parameterTimer.start();
 }
 
 int VehicleLink::rowCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : m_peers.size(); }
@@ -393,6 +396,7 @@ void VehicleLink::receive() {
                     beginInsertRows({}, row, row);
                     Peer peer;
                     peer.systemId = message.sysid;
+                    peer.session = ++m_nextSession;
                     m_peers.insert(row, peer);
                 }
                 auto &peer = m_peers[row];
@@ -401,6 +405,7 @@ void VehicleLink::receive() {
                 peer.port = static_cast<quint16>(datagram.senderPort());
                 peer.lastSeen = m_clock.elapsed();
                 peer.autopilot = heartbeat.autopilot;
+                if (added) peer.parameterBytewise = heartbeat.autopilot == MAV_AUTOPILOT_PX4;
                 peer.vehicleType = heartbeat.type;
                 peer.armed = heartbeat.base_mode & MAV_MODE_FLAG_SAFETY_ARMED;
                 if (peer.customMode != heartbeat.custom_mode) peer.standardMode = 0;
@@ -421,9 +426,15 @@ void VehicleLink::receive() {
                 // Only accept telemetry from the discovered flight controller endpoint/component.
                 if (message.compid != peer.componentId || datagram.senderAddress() != peer.address
                     || datagram.senderPort() != peer.port) continue;
-                if (message.msgid == MAVLINK_MSG_ID_AUTOPILOT_VERSION) {
+                if (message.msgid == MAVLINK_MSG_ID_PARAM_VALUE) {
+                    receiveParameter(peer, message);
+                } else if (message.msgid == MAVLINK_MSG_ID_AUTOPILOT_VERSION) {
                     mavlink_autopilot_version_t version{};
                     mavlink_msg_autopilot_version_decode(&message, &version);
+                    if (version.capabilities & MAV_PROTOCOL_CAPABILITY_PARAM_ENCODE_BYTEWISE)
+                        peer.parameterBytewise = true;
+                    else if (version.capabilities & MAV_PROTOCOL_CAPABILITY_PARAM_ENCODE_C_CAST)
+                        peer.parameterBytewise = false;
                     if (version.flight_sw_version != 0) {
                         peer.firmwareVersion = QString("%1.%2.%3")
                             .arg((version.flight_sw_version >> 24) & 0xff)
@@ -461,6 +472,10 @@ void VehicleLink::receive() {
                         || (ack.target_system && ack.target_system != 255)
                         || (ack.target_component && ack.target_component != MAV_COMP_ID_MISSIONPLANNER)) continue;
                     if (ack.result == MAV_RESULT_ACCEPTED || ack.result == MAV_RESULT_IN_PROGRESS) {
+                        if (ack.command == MAV_CMD_MISSION_START && ack.result == MAV_RESULT_ACCEPTED) {
+                            finishCommand(peer, "Mission start accepted.");
+                            continue;
+                        }
                         peer.commandStatus = ack.result == MAV_RESULT_ACCEPTED
                             ? "Accepted; waiting for vehicle state…" : "Vehicle request in progress…";
                         if (ack.result == MAV_RESULT_IN_PROGRESS) peer.commandDeadline = m_clock.elapsed() + 15000;
