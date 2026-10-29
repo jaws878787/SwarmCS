@@ -40,11 +40,20 @@ ApplicationWindow {
             }
         }
     }
-    Plugin { id: osm; name: "osm" }
+    Plugin {
+        id: osm
+        name: "osm"
+        PluginParameter { name: "osm.useragent"; value: "SwarmCS/0.1 (https://github.com/jaws878787/SwarmCS)" }
+        PluginParameter { name: "osm.mapping.providersrepository.disabled"; value: true }
+        PluginParameter { name: "osm.mapping.custom.host"; value: "https://tile.openstreetmap.org/" }
+        PluginParameter { name: "osm.mapping.custom.mapcopyright"; value: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors" }
+        PluginParameter { name: "osm.mapping.prefetching_style"; value: "NoPrefetching" }
+    }
     Map {
         id: map
         anchors.fill: parent
         plugin: osm
+        activeMapType: supportedMapTypes.length > 0 ? supportedMapTypes[supportedMapTypes.length - 1] : null
         center: QtPositioning.coordinate(39.7684, -86.1581)
         zoomLevel: 12
         copyrightsVisible: true
