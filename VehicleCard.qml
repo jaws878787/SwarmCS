@@ -22,7 +22,7 @@ Rectangle {
     Accessible.role: Accessible.ListItem
     Accessible.name: vehicleName + ", " + firmware + ", " + (armed ? "Armed" : "Disarmed") + ", " + flightMode
     radius: 6
-    property bool selected: vehicleLink.selectedSystemId === systemId
+    property bool selected: vehicleLink.selectedIds.indexOf(systemId) >= 0
     color: selected ? "#25413f" : hover.hovered ? "#223542" : "#1a2a36"
     border.color: selected ? "#66cbbb" : hover.hovered ? "#456273" : "#2b3f4d"
     HoverHandler { id: hover }
@@ -31,7 +31,7 @@ Rectangle {
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         onClicked: function(mouse) {
             if (mouse.button === Qt.RightButton) card.contextRequested(card.systemId)
-            else vehicleLink.centerVehicle(card.systemId)
+            else vehicleLink.selectVehicle(card.systemId,(mouse.modifiers & Qt.ControlModifier) !== 0)
         }
     }
     ColumnLayout {

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <QNetworkDatagram>
+#include <QGeoCoordinate>
 
 namespace {
 void sendPacket(QUdpSocket &socket, VehicleLink &link, const mavlink_message_t &message) {
@@ -45,6 +46,16 @@ void acknowledge(QUdpSocket &socket, VehicleLink &link, int systemId, int comman
     mavlink_msg_command_ack_pack(systemId,MAV_COMP_ID_AUTOPILOT1,&message,command,result,0,0,255,MAV_COMP_ID_MISSIONPLANNER);
     sendPacket(socket,link,message);
 }
+QList<mavlink_message_t> readPackets(QUdpSocket &socket) {
+    QTest::qWait(40);
+    QList<mavlink_message_t> result;
+    while (socket.hasPendingDatagrams()) {
+        const auto bytes=socket.receiveDatagram().data();
+        mavlink_message_t message{},buffer{}; mavlink_status_t parser{},status{};
+        for (auto byte:bytes) if (mavlink_frame_char_buffer(&buffer,&parser,quint8(byte),&message,&status)==MAVLINK_FRAMING_OK) result.append(message);
+    }
+    return result;
+}
 }
 
 class VehicleLinkTest : public QObject {
@@ -52,6 +63,124 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void missionDownloadClearAndUpload() {
+        VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicle;
+        QVERIFY(vehicle.bind(QHostAddress::LocalHost,0)); link.toggle(); heartbeat(vehicle,link,1);
+        QTRY_COMPARE(link.count(),1);
+        mavlink_message_t msg{}; mavlink_global_position_int_t p{};
+        p.lat=390000000; p.lon=-860000000; p.alt=200000;
+        mavlink_msg_global_position_int_encode(1,1,&msg,&p); sendPacket(vehicle,link,msg);
+        QTRY_VERIFY(link.vehicleDetails(1).value("positionValid").toBool());
+        link.selectVehicle(1); readPackets(vehicle); link.togglePlan();
+        QVERIFY(link.missionBusy());
+        mavlink_msg_mission_count_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,1,MAV_MISSION_TYPE_MISSION,0); sendPacket(vehicle,link,msg);
+        QTest::qWait(50);
+        mavlink_mission_item_int_t original{}; original.target_system=255; original.target_component=MAV_COMP_ID_MISSIONPLANNER;
+        original.command=MAV_CMD_NAV_TAKEOFF; original.frame=MAV_FRAME_GLOBAL_RELATIVE_ALT_INT;
+        original.x=p.lat; original.y=p.lon; original.z=42;
+        mavlink_msg_mission_item_int_encode(1,1,&msg,&original); sendPacket(vehicle,link,msg);
+        QTRY_VERIFY(!link.missionBusy()); QCOMPARE(link.planItems().size(),1);
+        QCOMPARE(link.planItems().first().toMap().value("altitude").toDouble(),42.0);
+        QVERIFY(!link.planItems().first().toMap().value("editable").toBool());
+        link.clearPlanMissions(); QVERIFY(link.missionBusy());
+        mavlink_msg_mission_ack_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,MAV_MISSION_ACCEPTED,MAV_MISSION_TYPE_MISSION,0); sendPacket(vehicle,link,msg);
+        QTRY_VERIFY(!link.missionBusy()); QCOMPARE(link.planItems().first().toMap().value("altitude").toDouble(),15.24);
+        link.addPlanWaypoint(39.001,-86.001); QVERIFY(link.planValid()); readPackets(vehicle);
+        link.uploadPlanMissions(); QVERIFY(link.missionBusy());
+        int count=0;
+        for (const auto &packet:readPackets(vehicle)) if (packet.msgid==MAVLINK_MSG_ID_MISSION_COUNT) count=mavlink_msg_mission_count_get_count(&packet);
+        QVERIFY(count>=4);
+        // A premature ACK must not mark an untransferred mission saved.
+        mavlink_msg_mission_ack_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,MAV_MISSION_ACCEPTED,MAV_MISSION_TYPE_MISSION,0); sendPacket(vehicle,link,msg);
+        QTest::qWait(50); QVERIFY(link.missionBusy());
+        bool speedSeen=false;
+        for (int seq=0;seq<count;++seq) {
+            mavlink_msg_mission_request_int_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,seq,MAV_MISSION_TYPE_MISSION); sendPacket(vehicle,link,msg);
+            bool found=false;
+            for (const auto &packet:readPackets(vehicle)) if (packet.msgid==MAVLINK_MSG_ID_MISSION_ITEM_INT) {
+                mavlink_mission_item_int_t sent{}; mavlink_msg_mission_item_int_decode(&packet,&sent);
+                QCOMPARE(int(sent.seq),seq); found=true;
+                if (sent.command==MAV_CMD_DO_CHANGE_SPEED) { speedSeen=true; QVERIFY(sent.param2>0); QCOMPARE(sent.param1,1.0f); }
+            }
+            QVERIFY(found);
+        }
+        QVERIFY(speedSeen);
+        mavlink_msg_mission_ack_pack(1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,MAV_MISSION_ACCEPTED,MAV_MISSION_TYPE_MISSION,0); sendPacket(vehicle,link,msg);
+        QTRY_VERIFY(!link.missionBusy()); QVERIFY(link.planStatus().contains("saved"));
+        link.toggle(); QVERIFY(!link.planActive());
+    }
+    void multiSelectionAndPlanning() {
+        VehicleLink link(nullptr,settingsFile(),0);
+        QUdpSocket vehicles[3];
+        link.toggle();
+        for (int n=0;n<3;++n) {
+            QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0));
+            heartbeat(vehicles[n],link,n+1);
+        }
+        QTRY_COMPARE(link.count(),3);
+        const auto group=link.createGroup("Pair");
+        link.moveToGroup(1,group); link.moveToGroup(2,group);
+        link.selectVehicle(1); link.selectVehicle(2,true);
+        QCOMPARE(link.selectedGroup(),group);
+        link.selectVehicle(3,true);
+        QCOMPARE(link.selectedGroup(),QString("__selected__"));
+        QCOMPARE(link.selectedIds().size(),3);
+        QCOMPARE(link.groupVehicles("__selected__").size(),3);
+        link.selectVehicleGroup(group,true);
+        QCOMPARE(link.selectedIds(),QVariantList{3});
+        link.selectVehicleGroup(group,true);
+        QCOMPARE(link.selectedIds().size(),3);
+        link.selectVehicle(1);
+        QVERIFY(link.selectedGroup().isEmpty()); QCOMPARE(link.selectedIds(),QVariantList{1});
+        link.selectVehicleGroup(group);
+        for (int n=0;n<3;++n) {
+            readCommands(vehicles[n]);
+            mavlink_global_position_int_t p{}; p.lat=390000000; p.lon=-860000000+n*2500; p.alt=200000;
+            mavlink_message_t msg{}; mavlink_msg_global_position_int_encode(n+1,1,&msg,&p); sendPacket(vehicles[n],link,msg);
+        }
+        QTRY_VERIFY(link.vehicleDetails(2).value("positionValid").toBool());
+        link.togglePlan(); QVERIFY(link.planActive()); QVERIFY(link.missionBusy());
+        link.selectVehicle(3); QCOMPARE(link.selectedIds().size(),2); // Planning locks participants.
+        for (int n=0;n<2;++n) {
+            mavlink_message_t msg{};
+            mavlink_msg_mission_count_pack(n+1,1,&msg,255,MAV_COMP_ID_MISSIONPLANNER,n==0 ? 1 : 0,MAV_MISSION_TYPE_MISSION,0);
+            sendPacket(vehicles[n],link,msg);
+        }
+        QTest::qWait(50);
+        mavlink_message_t homeMessage{};
+        mavlink_mission_item_int_t home{}; home.command=MAV_CMD_NAV_WAYPOINT; home.frame=MAV_FRAME_GLOBAL;
+        home.target_system=255; home.target_component=MAV_COMP_ID_MISSIONPLANNER;
+        home.x=390000000; home.y=-860000000; home.z=200;
+        mavlink_msg_mission_item_int_encode(1,1,&homeMessage,&home); sendPacket(vehicles[0],link,homeMessage);
+        QTRY_VERIFY(!link.missionBusy());
+        QCOMPARE(link.planItems().size(),1);
+        QCOMPARE(link.planItems().first().toMap().value("altitude").toDouble(),15.24);
+        link.addPlanWaypoint(39.001,-86.001);
+        QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
+        QCOMPARE(link.planItems().size(),2); QCOMPARE(link.planCenterPath().size(),2);
+        QCOMPARE(link.planCenterPath().last().toMap().value("latitude").toDouble(),39.001);
+        const auto paths=link.planPaths(); QCOMPARE(paths.size(),2);
+        const auto first=paths[0].toMap().value("path").toList();
+        const auto second=paths[1].toMap().value("path").toList();
+        QVERIFY(first.size()>=2); QVERIFY(second.size()>=3);
+        const auto endA=first.last().toMap(),endB=second.last().toMap();
+        QVERIFY(std::abs((endB.value("longitude").toDouble()-endA.value("longitude").toDouble())-0.00025)<0.000001);
+        QCOMPARE(endA.value("altitude").toDouble(),endB.value("altitude").toDouble());
+        link.addPlanWaypoint(39.002,-86.002);
+        QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
+        const auto compact=link.planPaths();
+        const auto compactA=compact[0].toMap().value("path").toList()[1].toMap();
+        const auto compactB=compact[1].toMap().value("path").toList()[2].toMap();
+        const double spacing=QGeoCoordinate(compactA.value("latitude").toDouble(),compactA.value("longitude").toDouble())
+            .distanceTo(QGeoCoordinate(compactB.value("latitude").toDouble(),compactB.value("longitude").toDouble()));
+        QVERIFY(spacing>=5 && spacing<10); // Intermediate slots compact around the clicked center.
+        link.removePlanItem(2);
+        link.setMinimumSeparation(100); QVERIFY(!link.planValid());
+        link.setMinimumSeparation(5); QVERIFY(link.planValid());
+        link.editPlanItem(1,100,7); QCOMPARE(link.planItems().last().toMap().value("altitude").toDouble(),30.48);
+        link.removePlanItem(1); QVERIFY(!link.planValid()); QCOMPARE(link.planItems().size(),1);
+        link.togglePlan(); QVERIFY(!link.planActive());
+    }
     void vehicleErrorMessages() {
         VehicleLink link(nullptr,settingsFile(),0);
         QUdpSocket first, second;

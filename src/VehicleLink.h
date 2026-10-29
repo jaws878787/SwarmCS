@@ -25,8 +25,18 @@ class VehicleLink final : public QAbstractListModel {
     Q_PROPERTY(QString takeoffUnit READ takeoffUnit NOTIFY takeoffSettingsChanged)
     Q_PROPERTY(int selectedSystemId READ selectedSystemId NOTIFY selectionChanged)
     Q_PROPERTY(QString selectedGroup READ selectedGroup NOTIFY selectionChanged)
+    Q_PROPERTY(QVariantList selectedIds READ selectedIds NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList navigationTargets READ navigationTargets NOTIFY navigationChanged)
     Q_PROPERTY(QVariantList navigationCenters READ navigationCenters NOTIFY navigationChanged)
+    Q_PROPERTY(bool planActive READ planActive NOTIFY planChanged)
+    Q_PROPERTY(bool missionBusy READ missionBusy NOTIFY planChanged)
+    Q_PROPERTY(QVariantList planVehicles READ planVehicles NOTIFY planChanged)
+    Q_PROPERTY(QVariantList planItems READ planItems NOTIFY planChanged)
+    Q_PROPERTY(QVariantList planPaths READ planPaths NOTIFY planChanged)
+    Q_PROPERTY(QVariantList planCenterPath READ planCenterPath NOTIFY planChanged)
+    Q_PROPERTY(QString planStatus READ planStatus NOTIFY planChanged)
+    Q_PROPERTY(bool planValid READ planValid NOTIFY planChanged)
+    Q_PROPERTY(double minimumSeparation READ minimumSeparation WRITE setMinimumSeparation NOTIFY planChanged)
 public:
     enum Role { SystemIdRole = Qt::UserRole + 1, VehicleNameRole, FirmwareRole,
                 ArmedRole, FlightModeRole, AltitudeRole, VelocityRole, VehicleGroupRole,
@@ -77,10 +87,29 @@ public:
     Q_INVOKABLE bool goTo(int systemId, double latitude, double longitude);
     Q_INVOKABLE void goToGroup(const QString &group, double latitude, double longitude);
     Q_INVOKABLE void selectGroup(const QString &group);
+    Q_INVOKABLE void selectVehicle(int systemId, bool additive = false);
+    Q_INVOKABLE void selectVehicleGroup(const QString &group, bool additive = false);
+    QVariantList selectedIds() const;
     int selectedSystemId() const { return m_selectedSystemId; }
     QString selectedGroup() const { return m_selectedGroup; }
     QVariantList navigationTargets() const;
     QVariantList navigationCenters() const;
+    bool planActive() const { return m_planActive; }
+    bool missionBusy() const;
+    bool planValid() const { return m_planValid; }
+    QString planStatus() const { return m_planStatus; }
+    double minimumSeparation() const { return m_minimumSeparation; }
+    QVariantList planVehicles() const;
+    QVariantList planItems() const;
+    QVariantList planPaths() const;
+    QVariantList planCenterPath() const;
+    Q_INVOKABLE void togglePlan();
+    Q_INVOKABLE void addPlanWaypoint(double latitude, double longitude);
+    Q_INVOKABLE void editPlanItem(int row, double altitudeFeet, double speed);
+    Q_INVOKABLE void removePlanItem(int row);
+    Q_INVOKABLE void clearPlanMissions();
+    Q_INVOKABLE void uploadPlanMissions();
+    Q_INVOKABLE void setMinimumSeparation(double meters);
 signals:
     void changed();
     void groupsChanged();
@@ -95,6 +124,7 @@ signals:
     void selectionChanged();
     void groupCenterRequested(const QString &group);
     void navigationChanged();
+    void planChanged();
 private:
     struct Parameter { double value = 0; quint8 type = 0; int index = -1; };
     struct Peer {
@@ -150,6 +180,8 @@ private:
         int missionCount = -1;
         quint8 missionState = 0;
         double homeAltitude = std::numeric_limits<double>::quiet_NaN();
+        double homeLatitude = std::numeric_limits<double>::quiet_NaN();
+        double homeLongitude = std::numeric_limits<double>::quiet_NaN();
         double altitude = std::numeric_limits<double>::quiet_NaN();
         double velocity = std::numeric_limits<double>::quiet_NaN();
         qint64 altitudeTime = -1;
@@ -224,4 +256,33 @@ private:
     int m_selectedSystemId = 0;
     QString m_selectedGroup;
     QMap<int, QString> m_resolvedNames;
+    QSet<int> m_selection;
+    void resolveSelection();
+    struct PlanPoint { double latitude; double longitude; double altitude = 15.24; double speed = 5; };
+    struct PlanVehicle { int id; quint64 session; double latitude; double longitude; double homeAltitude; };
+    struct MissionTransfer {
+        enum Operation { Download, Upload, Clear, Done, Failed } operation = Download;
+        int count = -1;
+        int next = 0;
+        int attempts = 0;
+        qint64 retryAt = 0;
+        QMap<int,mavlink_mission_item_int_t> received;
+        QList<mavlink_mission_item_int_t> items;
+        QString error;
+        bool legacyRequest = false;
+    };
+    bool m_planActive = false;
+    bool m_planValid = false;
+    bool m_loadedPlan = false;
+    double m_minimumSeparation = 5;
+    QString m_planStatus;
+    QList<PlanVehicle> m_planVehicles;
+    QList<PlanPoint> m_planPoints;
+    QMap<int,QList<mavlink_mission_item_int_t>> m_plannedMissions;
+    QMap<int,MissionTransfer> m_missionTransfers;
+    void rebuildPlan();
+    void sendMissionTransfer(int systemId);
+    bool receiveMission(Peer &peer, const mavlink_message_t &message);
+    void missionTick();
+    void finishMissionDownloads();
 };

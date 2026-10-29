@@ -17,7 +17,7 @@ Map {
         const members = []
         for (let i = 0; i < mapItems.length; ++i) {
             const item = mapItems[i]
-            if (item.vehicleGroup === group && item.positionValid) members.push(item)
+            if ((group === "__selected__" ? vehicleLink.selectedIds.indexOf(item.systemId) >= 0 : item.vehicleGroup === group) && item.positionValid) members.push(item)
         }
         if (members.length === 0) return
         fitViewportToMapItems(members)
@@ -28,6 +28,32 @@ Map {
         pendingGroupFit = ""
     }
     onMapReadyChanged: { if (mapReady && pendingGroupFit.length > 0) frameGroup(pendingGroupFit) }
+    MapItemView {
+        model: vehicleLink.planActive ? vehicleLink.planPaths : []
+        delegate: MapPolyline {
+            required property var modelData
+            line.width: 2; line.color: "#ffb360"
+            path: modelData.path.map(p => QtPositioning.coordinate(p.latitude,p.longitude))
+        }
+    }
+    MapPolyline {
+        visible: vehicleLink.planActive
+        line.width: 5; line.color: "#31e4ee"
+        path: vehicleLink.planCenterPath.map(p => QtPositioning.coordinate(p.latitude,p.longitude))
+    }
+    MapItemView {
+        model: vehicleLink.planActive ? vehicleLink.planCenterPath : []
+        delegate: MapQuickItem {
+            required property var modelData
+            required property int index
+            coordinate: QtPositioning.coordinate(modelData.latitude,modelData.longitude)
+            anchorPoint.x: 11; anchorPoint.y: 11
+            sourceItem: Rectangle {
+                width: 22; height: 22; radius: 11; color: "#102a31"; border.color: "#31e4ee"; border.width: 2
+                Label { anchors.centerIn: parent; text: index===0 ? "T" : index; font.pixelSize: 11; color: "#31e4ee" }
+            }
+        }
+    }
     MapItemView {
         model: vehicleLink.navigationCenters
         delegate: MapQuickItem {
@@ -92,8 +118,7 @@ Map {
                     width: 36
                     height: 36
                     kind: marker.iconId
-                    tint: map.viewState.selectedSystemId === marker.systemId
-                          || (vehicleLink.selectedGroup.length > 0 && vehicleLink.selectedGroup === marker.vehicleGroup) ? "#ffca82" : "#66e0ca"
+                    tint: vehicleLink.selectedIds.indexOf(marker.systemId) >= 0 ? "#ffca82" : "#66e0ca"
                     rotation: marker.heading
                 }
                 Rectangle {
@@ -113,11 +138,12 @@ Map {
         onTapped: function(eventPoint) {
             const coordinate = map.toCoordinate(eventPoint.position, false)
             if (!coordinate.isValid) return
+            if (vehicleLink.planActive) { vehicleLink.addPlanWaypoint(coordinate.latitude,coordinate.longitude); return }
             goHereMenu.latitude = coordinate.latitude
             goHereMenu.longitude = coordinate.longitude
             goHereMenu.systemId = vehicleLink.selectedSystemId
             goHereMenu.groupName = vehicleLink.selectedGroup
-            goHereMenu.targetName = goHereMenu.groupName.length > 0 ? goHereMenu.groupName
+            goHereMenu.targetName = goHereMenu.groupName === "__selected__" ? "Selected" : goHereMenu.groupName.length > 0 ? goHereMenu.groupName
                 : (vehicleLink.vehicleDetails(goHereMenu.systemId).vehicleName || "Select a vehicle or group")
             goHereMenu.popup()
         }

@@ -71,6 +71,7 @@ Rectangle {
     }
     ScrollView {
         id: vehicleScroll
+        visible: !vehicleLink.planActive
         anchors.top: titleCard.bottom
         anchors.left: parent.left
         anchors.right: parent.right
@@ -82,6 +83,28 @@ Rectangle {
             width: vehicleScroll.availableWidth
             padding: 12
             spacing: 9
+            Column {
+                visible: vehicleLink.selectedGroup === "__selected__"
+                width: parent.width - 24
+                spacing: 5
+                Rectangle {
+                    width: parent.width; height: 28; radius: 5; color: "#25413f"; border.color: "#66cbbb"
+                    Label { anchors.centerIn: parent; text: "Selected (" + vehicleLink.selectedIds.length + ")"; font.bold: true }
+                    TapHandler { acceptedButtons: Qt.RightButton; onTapped: { tree.selectedGroup="__selected__"; groupActionsMenu.popup() } }
+                }
+                Row {
+                    width: parent.width; spacing: 3
+                    Repeater {
+                        model: [{name:"Takeoff",action:"takeoff"},{name:"Land",action:"land"},{name:"Start",action:"mission"},{name:"RTL",action:"rtl"}]
+                        delegate: Button {
+                            required property var modelData
+                            width: (parent.width-9)/4; height: 24; padding: 2; font.pixelSize: 10
+                            text: modelData.name
+                            onClicked: vehicleLink.groupAction("__selected__",modelData.action)
+                        }
+                    }
+                }
+            }
             Repeater {
                 model: vehicleLink.groups
                 delegate: Column {
@@ -97,7 +120,14 @@ Rectangle {
                         text: (section.expanded ? "▾  " : "▸  ") + section.groupTitle
                               + "  (" + (vehicleLink.groupCounts[section.groupTitle] || 0) + ")"
                         Accessible.name: section.groupTitle + " vehicle group"
-                        onClicked: vehicleLink.selectGroup(section.groupTitle)
+                        MouseArea {
+                            x: 27; y: 0; width: parent.width-27; height: parent.height
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: function(mouse) {
+                                if (mouse.button === Qt.RightButton) { tree.selectedGroup=section.groupTitle; groupActionsMenu.popup() }
+                                else vehicleLink.selectVehicleGroup(section.groupTitle,(mouse.modifiers & Qt.ControlModifier) !== 0)
+                            }
+                        }
                         TapHandler {
                             acceptedButtons: Qt.RightButton
                             onTapped: { tree.selectedGroup = section.groupTitle; groupActionsMenu.popup() }
@@ -166,6 +196,32 @@ Rectangle {
                 wrapMode: Text.WordWrap
                 topPadding: 8
                 bottomPadding: 8
+            }
+        }
+    }
+    ScrollView {
+        id: planningVehicles
+        visible: vehicleLink.planActive
+        anchors.top: titleCard.bottom; anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+        clip: true
+        contentWidth: availableWidth
+        Column {
+            width: planningVehicles.availableWidth; spacing: 8; padding: 12
+            Repeater {
+                model: vehicleLink
+                delegate: Rectangle {
+                    required property int systemId
+                    required property string vehicleName
+                    required property string firmware
+                    width: parent.width-24; height: 58
+                    visible: vehicleLink.planVehicles.some(v => v.systemId === systemId)
+                    color: "#25413f"; border.color: "#66cbbb"; radius: 5
+                    Column {
+                        anchors.centerIn: parent; width: parent.width-12; spacing: 5
+                        Label { text: vehicleName; textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; font.bold: true; elide: Text.ElideRight }
+                        Label { text: firmware; width: parent.width; horizontalAlignment: Text.AlignHCenter; color: "#879eae"; font.pixelSize: 10 }
+                    }
+                }
             }
         }
     }

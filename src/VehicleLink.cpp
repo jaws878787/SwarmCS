@@ -212,17 +212,7 @@ void VehicleLink::requestModes(Peer &peer) {
 }
 
 void VehicleLink::centerVehicle(int systemId) {
-    const int row = rowForSystem(systemId);
-    if (row < 0) { emit notice("Vehicle disconnected."); return; }
-    m_selectedSystemId = systemId;
-    m_selectedGroup.clear();
-    emit selectionChanged();
-    if (row < 0 || !positionValid(m_peers[row])) {
-        emit notice(nameForSystem(systemId) + ": position is not available yet.");
-        return;
-    }
-    const auto &peer = m_peers[row];
-    emit centerRequested(systemId,peer.latitude,peer.longitude);
+    selectVehicle(systemId,false);
 }
 
 void VehicleLink::toggleVelocityUnit() {
@@ -420,7 +410,7 @@ void VehicleLink::clearVehicleNames() {
 
 QString VehicleLink::createGroup(const QString &name) {
     const auto trimmed = name.trimmed();
-    if (trimmed.isEmpty() || trimmed.size() > 48) return {};
+    if (trimmed.isEmpty() || trimmed.size() > 48 || trimmed == "__selected__") return {};
     for (const auto &group : m_groups)
         if (group.compare(trimmed, Qt::CaseInsensitive) == 0) return group;
     auto next = m_groups;
@@ -439,6 +429,7 @@ void VehicleLink::moveToGroup(int systemId, const QString &group) {
     m_settings->sync();
     const int row = rowForSystem(systemId);
     if (row >= 0) emit dataChanged(index(row), index(row), {VehicleGroupRole});
+    resolveSelection();
     emit groupsChanged();
 }
 
@@ -452,6 +443,10 @@ void VehicleLink::toggle() {
         emit navigationChanged();
         m_selectedSystemId = 0;
         m_selectedGroup.clear();
+        m_selection.clear();
+        m_planActive=false;
+        m_missionTransfers.clear();
+        emit planChanged();
         emit selectionChanged();
         endResetModel();
         m_status = "Disconnected";
@@ -513,6 +508,7 @@ void VehicleLink::receive() {
                     endInsertRows();
                     requestTelemetry(peer);
                     sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_AUTOPILOT_VERSION);
+                    sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_HOME_POSITION);
                     sendCommand(peer, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_STATUSTEXT);
                     sendCommand(peer, MAV_CMD_RUN_PREARM_CHECKS);
                     mavlink_message_t missionRequest{};
@@ -532,12 +528,13 @@ void VehicleLink::receive() {
                 // Only accept telemetry from the discovered flight controller endpoint/component.
                 if (message.compid != peer.componentId || datagram.senderAddress() != peer.address
                     || datagram.senderPort() != peer.port) continue;
+                if (receiveMission(peer,message)) continue;
                 if (message.msgid == MAVLINK_MSG_ID_MISSION_COUNT) {
                     mavlink_mission_count_t count{};
                     mavlink_msg_mission_count_decode(&message,&count);
                     if (count.mission_type == MAV_MISSION_TYPE_MISSION && (!count.target_system || count.target_system == 255)
                         && (!count.target_component || count.target_component == MAV_COMP_ID_MISSIONPLANNER)) {
-                        peer.missionCount = count.count;
+                        peer.missionCount = std::max(0,int(count.count)-(peer.autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA ? 1 : 0));
                         mavlink_message_t reply{};
                         mavlink_status_t tx{};
                         tx.current_tx_seq = m_sequence++;
@@ -550,7 +547,7 @@ void VehicleLink::receive() {
                     mavlink_msg_mission_current_decode(&message,&current);
                     peer.missionState = current.mission_state;
                     if (current.mission_state == MISSION_STATE_NO_MISSION) peer.missionCount = 0;
-                    else if (current.total && current.total != UINT16_MAX) peer.missionCount = current.total;
+                    else if (current.total && current.total != UINT16_MAX) peer.missionCount = std::max(0,int(current.total)-(peer.autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA ? 1 : 0));
                 } else if (message.msgid == MAVLINK_MSG_ID_STATUSTEXT) {
                     receiveStatusText(peer,message);
                 } else if (message.msgid == MAVLINK_MSG_ID_SYS_STATUS) {
@@ -579,6 +576,8 @@ void VehicleLink::receive() {
                     mavlink_home_position_t home{};
                     mavlink_msg_home_position_decode(&message,&home);
                     peer.homeAltitude = home.altitude / 1000.0;
+                    peer.homeLatitude = home.latitude / 1e7;
+                    peer.homeLongitude = home.longitude / 1e7;
                 } else if (message.msgid == MAVLINK_MSG_ID_GLOBAL_POSITION_INT) {
                     mavlink_global_position_int_t position{};
                     mavlink_msg_global_position_int_decode(&message, &position);
@@ -683,6 +682,7 @@ void VehicleLink::receive() {
         }
     }
     if (structureChanged) {
+        resolveSelection();
         emit groupsChanged();
         emit changed();
     }
@@ -741,9 +741,11 @@ void VehicleLink::tick() {
     }
     if (!m_peers.isEmpty()) emit dataChanged(index(0), index(m_peers.size() - 1), {AltitudeRole, VelocityRole, PositionValidRole});
     if (removed) {
+        resolveSelection();
         emit groupsChanged();
         emit changed();
     }
+    missionTick();
     updateNavigation();
     updateStatus();
 }

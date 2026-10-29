@@ -28,6 +28,7 @@ ApplicationWindow {
         category: "Map"
         property int zoomStep: 5
     }
+    Settings { id: planUnits; category: "PlanningUnits"; property bool altitudeMetric: false; property bool distanceMetric: false; property bool speedMetric: false }
     property bool autoCenterAllowed: true
     property int searchDots: 0
     readonly property int selectedSystemId: vehicleLink.selectedSystemId
@@ -106,6 +107,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
             }
             RowLayout {
+                visible: !vehicleLink.planActive
                 spacing: 5
                 Label { text: "Takeoff altitude"; font.pixelSize: 11 }
                 TextField {
@@ -136,6 +138,38 @@ ApplicationWindow {
                     onClicked: vehicleLink.toggleTakeoffUnit()
                 }
             }
+            RowLayout {
+                visible: vehicleLink.planActive
+                spacing: 5
+                Label { text: "Min separation"; font.pixelSize: 11 }
+                TextField {
+                    id: separationField
+                    Layout.preferredWidth: 65; implicitHeight: 34
+                    text: (vehicleLink.minimumSeparation * (planUnits.distanceMetric ? 1 : 1/0.3048)).toFixed(1)
+                    validator: DoubleValidator { bottom: planUnits.distanceMetric ? 0.3 : 0.9843; top: planUnits.distanceMetric ? 1000 : 3280.83; locale: "en_US" }
+                    onEditingFinished: {
+                        if (acceptableInput) vehicleLink.setMinimumSeparation(Number(text)*(planUnits.distanceMetric ? 1 : 0.3048))
+                        text=(vehicleLink.minimumSeparation*(planUnits.distanceMetric ? 1 : 1/0.3048)).toFixed(1)
+                    }
+                }
+                ToolButton { text: planUnits.distanceMetric ? "m" : "ft"; onClicked: { planUnits.distanceMetric = !planUnits.distanceMetric; separationField.text=(vehicleLink.minimumSeparation*(planUnits.distanceMetric ? 1 : 1/0.3048)).toFixed(1) } }
+                Button { text: "Clear"; enabled: !vehicleLink.missionBusy; onClicked: vehicleLink.clearPlanMissions() }
+                Button { text: "Upload"; enabled: vehicleLink.planValid && !vehicleLink.missionBusy; onClicked: vehicleLink.uploadPlanMissions() }
+            }
+            Button {
+                text: vehicleLink.planActive ? "Fly" : "Plan"
+                implicitHeight: 38
+                enabled: !vehicleLink.missionBusy
+                onClicked: vehicleLink.togglePlan()
+            }
+            Button {
+                text: vehicleLink.listening ? "Disconnect" : "Connect"
+                onClicked: vehicleLink.toggle()
+                implicitWidth: 120
+                implicitHeight: 38
+                background: Rectangle { radius: 6; color: parent.down ? "#258a82" : "#39b6a7" }
+                contentItem: Text { text: parent.text; color: "#071b1b"; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+            }
             ToolButton {
                 text: "\u2699"
                 font.pixelSize: 26
@@ -146,14 +180,7 @@ ApplicationWindow {
                 ToolTip.text: "Connection settings"
                 onClicked: connectionSettings.open()
             }
-            Button {
-                text: vehicleLink.listening ? "Disconnect" : "Connect"
-                onClicked: vehicleLink.toggle()
-                implicitWidth: 120
-                implicitHeight: 38
-                background: Rectangle { radius: 6; color: parent.down ? "#258a82" : "#39b6a7" }
-                contentItem: Text { text: parent.text; color: "#071b1b"; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-            }
+
         }
     }
     Plugin {
@@ -182,9 +209,16 @@ ApplicationWindow {
         id: mapLoader
         anchors.left: vehicleTree.right
         anchors.top: parent.top
-        anchors.right: parent.right
+        anchors.right: missionPanel.left
         anchors.bottom: parent.bottom
         sourceComponent: window.satellite ? satelliteView : streetView
+    }
+    MissionPanel {
+        id: missionPanel
+        anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
+        width: vehicleLink.planActive ? Math.min(340,window.width*0.3) : 0
+        visible: vehicleLink.planActive
+        units: planUnits
     }
     VehicleTree {
         id: vehicleTree
@@ -195,7 +229,7 @@ ApplicationWindow {
     }
     Button {
         id: mapTypeButton
-        anchors.right: parent.right
+        anchors.right: missionPanel.left
         anchors.bottom: parent.bottom
         anchors.margins: 20
         text: window.satellite ? "Street map" : "Satellite"
@@ -205,7 +239,7 @@ ApplicationWindow {
         onClicked: window.satellite = !window.satellite
     }
     Rectangle {
-        anchors.right: parent.right
+        anchors.right: missionPanel.left
         anchors.rightMargin: 20
         y: mapTypeButton.y * 0.05
         width: 58

@@ -15,7 +15,7 @@ QString modeKey(QString name, int standardMode = 0) {
 QVariantList VehicleLink::groupVehicles(const QString &group) const {
     QVariantList result;
     for (const auto &peer : m_peers)
-        if (groupForSystem(peer.systemId) == group)
+        if (group == "__selected__" ? m_selection.contains(peer.systemId) : groupForSystem(peer.systemId) == group)
             result.append(QVariantMap{{"systemId",peer.systemId},{"name",nameForSystem(peer.systemId)}});
     return result;
 }

@@ -49,18 +49,64 @@ void VehicleLink::updateNavigation() {
 }
 
 void VehicleLink::selectGroup(const QString &group) {
-    if (!m_groups.contains(group)) return;
-    m_selectedGroup = group;
-    m_selectedSystemId = 0;
+    selectVehicleGroup(group,false);
+}
+
+QVariantList VehicleLink::selectedIds() const {
+    QVariantList result;
+    for (const auto &peer : m_peers) if (m_selection.contains(peer.systemId)) result.append(peer.systemId);
+    return result;
+}
+
+void VehicleLink::resolveSelection() {
+    for (auto it = m_selection.begin(); it != m_selection.end();)
+        if (rowForSystem(*it) < 0) it = m_selection.erase(it); else ++it;
+    m_selectedSystemId = m_selection.size() == 1 ? *m_selection.cbegin() : 0;
+    m_selectedGroup.clear();
+    if (m_selection.size() > 1) {
+        m_selectedGroup = "__selected__";
+        for (const auto &group : m_groups) {
+            QSet<int> members;
+            for (const auto &peer : m_peers) if (groupForSystem(peer.systemId) == group) members.insert(peer.systemId);
+            if (members == m_selection) { m_selectedGroup = group; break; }
+        }
+    }
     emit selectionChanged();
+}
+
+void VehicleLink::selectVehicle(int systemId, bool additive) {
+    if (rowForSystem(systemId) < 0 || m_planActive) return;
+    if (!additive) m_selection.clear();
+    if (additive && m_selection.contains(systemId)) m_selection.remove(systemId); else m_selection.insert(systemId);
+    resolveSelection();
+    if (m_selection.size()>1) emit groupCenterRequested("__selected__");
+    else if (m_selection.size()==1) {
+        const int selected=*m_selection.cbegin();
+        const auto &peer=m_peers[rowForSystem(selected)];
+        if (positionValid(peer)) emit centerRequested(selected,peer.latitude,peer.longitude);
+    }
+}
+
+void VehicleLink::selectVehicleGroup(const QString &group, bool additive) {
+    if ((!m_groups.contains(group) && group != "__selected__") || m_planActive) return;
+    const auto members = groupVehicles(group);
+    bool all = !members.isEmpty();
+    for (const auto &member : members) if (!m_selection.contains(member.toMap().value("systemId").toInt())) all = false;
+    if (!additive) m_selection.clear();
+    for (const auto &member : members) {
+        const int id = member.toMap().value("systemId").toInt();
+        if (additive && all) m_selection.remove(id); else m_selection.insert(id);
+    }
+    resolveSelection();
+    if (!additive && group != "__selected__" && members.size() == 1) { m_selectedGroup = group; m_selectedSystemId = 0; emit selectionChanged(); }
     bool any = false;
     int missing = 0;
     for (const auto &peer : m_peers) {
-        if (groupForSystem(peer.systemId) != group) continue;
+        if (!m_selection.contains(peer.systemId)) continue;
         if (positionValid(peer)) any = true;
         else ++missing;
     }
-    if (any) emit groupCenterRequested(group);
+    if (any) emit groupCenterRequested("__selected__");
     else emit notice(group + ": no positions available.");
     if (any && missing) emit notice(QString("%1: %2 position(s) unavailable.").arg(group).arg(missing));
 }
