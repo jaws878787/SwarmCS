@@ -108,37 +108,39 @@ void VehicleLink::savePlanMetadata() {
         {"signatures",signatures},{"missions",missions},{"sequences",sequences},{"separation",m_minimumSeparation},{"rtl",m_planRtl}});
     m_settings->sync();
 }
+bool VehicleLink::missionMatchesMetadata(int id,const QVariantMap &saved,const QList<mavlink_mission_item_int_t> &actual) const {
+    auto frame=[](int value) { return value==MAV_FRAME_GLOBAL_INT ? MAV_FRAME_GLOBAL : value==MAV_FRAME_GLOBAL_RELATIVE_ALT_INT ? MAV_FRAME_GLOBAL_RELATIVE_ALT
+        : value==MAV_FRAME_GLOBAL_TERRAIN_ALT_INT ? MAV_FRAME_GLOBAL_TERRAIN_ALT : value; };
+    if (saved.value("signatures").toMap().value(QString::number(id)).toString()==missionSignature(id,actual)) return true;
+    const auto expected=saved.value("missions").toMap().value(QString::number(id)).toList();
+    if (expected.isEmpty() || expected.size()!=actual.size()) return false;
+    const int row=rowForSystem(id);
+    const bool ardupilot=row>=0 && m_peers[row].autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA;
+    for (int seq=0;seq<actual.size();++seq) {
+        const auto e=expected[seq].toMap(); const auto &a=actual[seq];
+        if (ardupilot && seq==0 && a.command==MAV_CMD_NAV_WAYPOINT) continue;
+        if (e.value("command").toInt()!=a.command || (navigation(a) && frame(e.value("frame").toInt())!=frame(a.frame))) return false;
+        const double params[]={a.param1,a.param2,a.param3,a.param4,a.z};
+        const QString keys[]={"p1","p2","p3","p4","z"};
+        for (int n=0;n<5;++n) {
+            if (ardupilot && a.command==MAV_CMD_NAV_WAYPOINT && n==1) continue; // Copter does not retain acceptance-radius param2.
+            const double value=e.value(keys[n]).toDouble();
+            if ((std::isfinite(value)!=std::isfinite(params[n])) || (std::isfinite(value) && std::abs(value-params[n])>0.001)) return false;
+        }
+        // Some firmware stores coordinates through float precision. Account for
+        // that quantization while still requiring every command and parameter to match.
+        if (navigation(a)) {
+            if (QGeoCoordinate(e.value("x").toInt()/1e7,e.value("y").toInt()/1e7).distanceTo(QGeoCoordinate(a.x/1e7,a.y/1e7))>2) return false;
+        } else if (e.value("x").toInt()!=a.x || e.value("y").toInt()!=a.y) return false;
+    }
+    return true;
+}
+
 bool VehicleLink::restorePlanMetadata() {
     const auto saved=m_settings->value("missionPlans/"+missionPlanKey()).toMap();
     if ((saved.value("version").toInt()!=1 && saved.value("version").toInt()!=2) || saved.value("points").toList().isEmpty()) return false;
-    const auto signatures=saved.value("signatures").toMap();
-    auto frame=[](int value) { return value==MAV_FRAME_GLOBAL_INT ? MAV_FRAME_GLOBAL : value==MAV_FRAME_GLOBAL_RELATIVE_ALT_INT ? MAV_FRAME_GLOBAL_RELATIVE_ALT
-        : value==MAV_FRAME_GLOBAL_TERRAIN_ALT_INT ? MAV_FRAME_GLOBAL_TERRAIN_ALT : value; };
-    for (const auto &v:m_planVehicles) {
-        if (signatures.value(QString::number(v.id)).toString()==missionSignature(v.id,m_plannedMissions.value(v.id))) continue;
-        const auto expected=saved.value("missions").toMap().value(QString::number(v.id)).toList();
-        const auto actual=m_plannedMissions.value(v.id);
-        if (expected.isEmpty() || expected.size()!=actual.size()) return false;
-        const int row=rowForSystem(v.id);
-        const bool ardupilot=row>=0 && m_peers[row].autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA;
-        for (int seq=0;seq<actual.size();++seq) {
-            const auto e=expected[seq].toMap(); const auto &a=actual[seq];
-            if (ardupilot && seq==0 && a.command==MAV_CMD_NAV_WAYPOINT) continue;
-            if (e.value("command").toInt()!=a.command || (navigation(a) && frame(e.value("frame").toInt())!=frame(a.frame))) return false;
-            const double params[]={a.param1,a.param2,a.param3,a.param4,a.z};
-            const QString keys[]={"p1","p2","p3","p4","z"};
-            for (int n=0;n<5;++n) {
-                if (ardupilot && a.command==MAV_CMD_NAV_WAYPOINT && n==1) continue; // Copter does not retain acceptance-radius param2.
-                const double value=e.value(keys[n]).toDouble();
-                if ((std::isfinite(value)!=std::isfinite(params[n])) || (std::isfinite(value) && std::abs(value-params[n])>0.001)) return false;
-            }
-            // Some firmware stores coordinates through float precision. Account for
-            // that quantization while still requiring every command and parameter to match.
-            if (navigation(a)) {
-                if (QGeoCoordinate(e.value("x").toInt()/1e7,e.value("y").toInt()/1e7).distanceTo(QGeoCoordinate(a.x/1e7,a.y/1e7))>2) return false;
-            } else if (e.value("x").toInt()!=a.x || e.value("y").toInt()!=a.y) return false;
-        }
-    }
+    for (const auto &v:m_planVehicles)
+        if (!missionMatchesMetadata(v.id,saved,m_plannedMissions.value(v.id))) return false;
     m_planPoints.clear();
     for (const auto &entry:saved.value("points").toList()) {
         const auto p=entry.toMap(); m_planPoints.append({p.value("latitude").toDouble(),p.value("longitude").toDouble(),p.value("altitude").toDouble(),p.value("speed").toDouble()});

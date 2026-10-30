@@ -42,6 +42,9 @@ class VehicleLink final : public QAbstractListModel {
     Q_PROPERTY(bool planValid READ planValid NOTIFY planChanged)
     Q_PROPERTY(double minimumSeparation READ minimumSeparation WRITE setMinimumSeparation NOTIFY planChanged)
     Q_PROPERTY(double defaultPlanSpeed READ defaultPlanSpeed NOTIFY planChanged)
+    Q_PROPERTY(bool liveAdjustmentAvailable READ liveAdjustmentAvailable NOTIFY liveAdjustmentChanged)
+    Q_PROPERTY(bool liveAdjustmentEnabled READ liveAdjustmentEnabled NOTIFY liveAdjustmentChanged)
+    Q_PROPERTY(QString liveAdjustmentStatus READ liveAdjustmentStatus NOTIFY liveAdjustmentChanged)
 public:
     enum Role { SystemIdRole = Qt::UserRole + 1, VehicleNameRole, FirmwareRole,
                 ArmedRole, FlightModeRole, AltitudeRole, VelocityRole, VehicleGroupRole,
@@ -125,6 +128,11 @@ public:
     Q_INVOKABLE void uploadPlanMissions();
     Q_INVOKABLE void setMinimumSeparation(double meters);
     Q_INVOKABLE void setDefaultPlanSpeed(double metersPerSecond, bool updateExisting = false);
+    Q_INVOKABLE bool startMission(int systemId);
+    bool liveAdjustmentAvailable() const;
+    bool liveAdjustmentEnabled() const { return m_liveEnabled; }
+    QString liveAdjustmentStatus() const { return m_liveStatus; }
+    Q_INVOKABLE void setLiveAdjustmentEnabled(bool enabled);
 signals:
     void changed();
     void groupsChanged();
@@ -141,6 +149,7 @@ signals:
     void navigationChanged();
     void planChanged();
     void planSelectionChanged();
+    void liveAdjustmentChanged();
 private:
     struct Parameter { double value = 0; quint8 type = 0; int index = -1; };
     struct Peer {
@@ -192,9 +201,12 @@ private:
         qint64 statusTextTime = -1;
         double queuedTakeoff = std::numeric_limits<double>::quiet_NaN();
         bool missionTakeoff = false;
+        bool queuedMissionStart = false;
         double takeoffTarget = std::numeric_limits<double>::quiet_NaN();
         int missionCount = -1;
         quint8 missionState = 0;
+        int missionSequence = -1;
+        qint64 missionTime = -1;
         double homeAltitude = std::numeric_limits<double>::quiet_NaN();
         double homeLatitude = std::numeric_limits<double>::quiet_NaN();
         double homeLongitude = std::numeric_limits<double>::quiet_NaN();
@@ -314,5 +326,21 @@ private:
     QString missionSignature(int systemId, const QList<mavlink_mission_item_int_t> &items) const;
     void savePlanMetadata();
     bool restorePlanMetadata();
+    bool missionMatchesMetadata(int id, const QVariantMap &saved, const QList<mavlink_mission_item_int_t> &actual) const;
+    QVariantMap sharedFlightPlan() const;
+    bool missionMode(const Peer &peer) const;
+    void advanceMissionStarts();
+    void cancelMissionStarts();
+    QSet<int> m_missionStartBatch;
+    void liveAdjustmentTick();
+    void stopLiveAdjustment(const QString &reason, bool restore = true);
+    bool receiveLiveSpeedAck(Peer &peer, const mavlink_command_ack_t &ack);
+    struct LiveSpeed { double baseline=0; double requested=0; int stage=-1; qint64 awaiting=-1; };
+    QMap<int,LiveSpeed> m_liveSpeeds;
+    QMap<int,quint64> m_liveSessions;
+    QSet<int> m_liveIds;
+    bool m_liveEnabled=false;
+    bool m_liveFlying=false;
+    QString m_liveStatus;
     bool recoverGeneratedPlan();
 };

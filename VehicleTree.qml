@@ -300,6 +300,11 @@ Rectangle {
         popupType: Popup.Item
         cascade: true
         MenuItem {
+            text: "Start mission"
+            enabled: tree.selectedVehicle.connected === true && !tree.selectedVehicle.commandPending
+            onTriggered: vehicleLink.startMission(tree.selectedSystemId)
+        }
+        MenuItem {
             text: tree.selectedVehicle.armed ? "Disarm" : "Arm"
             enabled: tree.selectedVehicle.connected === true && !tree.selectedVehicle.commandPending
             onTriggered: vehicleLink.setArmed(tree.selectedSystemId, !tree.selectedVehicle.armed)

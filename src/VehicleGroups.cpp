@@ -46,6 +46,14 @@ QVariantList VehicleLink::groupModes(const QString &group) const {
 
 void VehicleLink::groupAction(const QString &group, const QString &action, const QString &mode) {
     const auto vehicles = groupVehicles(group);
+    if (action=="mission") {
+        if (!m_missionStartBatch.isEmpty()) { emit notice("Mission start already pending."); return; }
+        for (const auto &v:vehicles) {
+            const int id=v.toMap().value("systemId").toInt(); const auto &p=m_peers[rowForSystem(id)];
+            if (p.pendingCommand || p.missionCount<=0) { failVehicle(m_peers[rowForSystem(id)],"Mission unavailable or command pending."); return; }
+        }
+        for (const auto &v:vehicles) m_missionStartBatch.insert(v.toMap().value("systemId").toInt());
+    }
     QStringList skipped;
     int sent = 0;
     for (const auto &vehicle : vehicles) {
@@ -66,21 +74,12 @@ void VehicleLink::groupAction(const QString &group, const QString &action, const
                     break;
                 }
             }
-        } else if (action == "mission" && peer.armed && !peer.pendingCommand) {
-            success = sendCommand(peer, MAV_CMD_MISSION_START, 0, 0);
-            if (success) {
-                peer.pendingCommand = MAV_CMD_MISSION_START;
-                peer.commandDeadline = m_clock.elapsed() + 10000;
-                peer.commandStatus = "Starting mission…";
-                const auto row = rowForSystem(id);
-                emit dataChanged(index(row),index(row),{CommandPendingRole,CommandStatusRole});
-            }
-        } else if (action == "mission" && !peer.armed) {
-            failVehicle(peer,"Mission: arm first.");
-        }
+        } else if (action == "mission") success = startMission(id);
         if (success) ++sent;
         else skipped.append(item.value("name").toString());
+        if (action=="mission" && !success) { cancelMissionStarts(); break; }
     }
+    if (action=="mission") advanceMissionStarts();
     const QString label = action == "arm" ? "Arm" : action == "disarm" ? "Disarm" : action == "takeoff" ? "Takeoff" : action == "land" ? "Land"
         : action == "mission" ? "Mission" : action == "rtl" ? "RTL" : "Mode";
     QString report = QString("%1 · %2: %3 requested").arg(group,label).arg(sent);

@@ -127,6 +127,7 @@ bool VehicleLink::land(int systemId) {
 }
 
 bool VehicleLink::goTo(int systemId, double latitude, double longitude) {
+    if (m_liveIds.contains(systemId)) stopLiveAdjustment("Live adjustments: Go Here requested.");
     const int row = rowForSystem(systemId);
     if (row < 0) { emit notice("Vehicle disconnected."); return false; }
     auto &peer = m_peers[row];

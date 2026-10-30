@@ -115,6 +115,14 @@ ApplicationWindow {
             RowLayout {
                 visible: !vehicleLink.planActive
                 spacing: 5
+                Switch {
+                    visible: vehicleLink.liveAdjustmentAvailable || vehicleLink.liveAdjustmentEnabled
+                    text: "Live adjustments"
+                    checked: vehicleLink.liveAdjustmentEnabled
+                    onToggled: vehicleLink.setLiveAdjustmentEnabled(checked)
+                    ToolTip.visible: hovered
+                    ToolTip.text: vehicleLink.liveAdjustmentStatus || "Slow leading drones to keep shared mission progress together"
+                }
                 Label { text: "Takeoff altitude"; font.pixelSize: 11 }
                 TextField {
                     id: takeoffAltitudeField

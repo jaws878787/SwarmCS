@@ -88,6 +88,103 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void missionStartArmsWholeGroupFirst() {
+        VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[2]; link.toggle();
+        for (int n=0;n<2;++n) { QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0)); heartbeat(vehicles[n],link,n+1); }
+        QTRY_COMPARE(link.count(),2);
+        for (auto &v:vehicles) readCommands(v);
+        QVERIFY(!link.startMission(1)); // Never arm without a known mission.
+        for (int n=0;n<2;++n) {
+            mavlink_mission_current_t c{}; c.total=3; c.mission_state=MISSION_STATE_NOT_STARTED;
+            mavlink_message_t msg{}; mavlink_msg_mission_current_encode(n+1,1,&msg,&c); sendPacket(vehicles[n],link,msg);
+        }
+        QTest::qWait(40); link.groupAction("Ungrouped","mission");
+        for (auto &v:vehicles) {
+            const auto commands=readCommands(v); QCOMPARE(commands.size(),1);
+            QCOMPARE(commands[0].command,quint16(MAV_CMD_COMPONENT_ARM_DISARM));
+            QCOMPARE(commands[0].param1,1.0f); QCOMPARE(commands[0].param2,0.0f);
+        }
+        acknowledge(vehicles[0],link,1,MAV_CMD_COMPONENT_ARM_DISARM,MAV_RESULT_ACCEPTED);
+        QTest::qWait(40); QVERIFY(readCommands(vehicles[0]).isEmpty()); // ACK is not armed confirmation.
+        heartbeat(vehicles[0],link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,true);
+        QVERIFY(readCommands(vehicles[0]).isEmpty()); QVERIFY(readCommands(vehicles[1]).isEmpty());
+        heartbeat(vehicles[1],link,2,MAV_AUTOPILOT_ARDUPILOTMEGA,0,true);
+        for (auto &v:vehicles) { const auto commands=readCommands(v); QCOMPARE(commands.size(),1); QCOMPARE(commands[0].command,quint16(MAV_CMD_MISSION_START)); }
+        for (int n=0;n<2;++n) acknowledge(vehicles[n],link,n+1,MAV_CMD_MISSION_START,MAV_RESULT_ACCEPTED);
+        QTRY_VERIFY(!link.vehicleDetails(2).value("commandPending").toBool());
+        for (int n=0;n<2;++n) heartbeat(vehicles[n],link,n+1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,false);
+        QTest::qWait(40); link.groupAction("Ungrouped","mission");
+        for (auto &v:vehicles) readCommands(v);
+        acknowledge(vehicles[1],link,2,MAV_CMD_COMPONENT_ARM_DISARM,MAV_RESULT_DENIED);
+        QTest::qWait(40); heartbeat(vehicles[0],link,1,MAV_AUTOPILOT_ARDUPILOTMEGA,0,true);
+        for (auto &v:vehicles) for (const auto &c:readCommands(v)) QVERIFY(c.command!=MAV_CMD_MISSION_START);
+    }
+    void liveSharedMissionSpeeds() {
+        VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[2]; link.toggle();
+        for (int n=0;n<2;++n) { QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0)); heartbeat(vehicles[n],link,n+1); }
+        QTRY_COMPARE(link.count(),2);
+        for (int n=0;n<2;++n) {
+            mavlink_global_position_int_t p{}; p.lat=390000000; p.lon=-860000000+n*2500; p.alt=200000;
+            mavlink_message_t msg{}; mavlink_msg_global_position_int_encode(n+1,1,&msg,&p); sendPacket(vehicles[n],link,msg);
+        }
+        QTRY_VERIFY(link.vehicleDetails(2).value("positionValid").toBool());
+        link.selectGroup("Ungrouped"); QVERIFY(!link.liveAdjustmentAvailable()); link.togglePlan();
+        for (int n=0;n<2;++n) downloadMission(vehicles[n],link,n+1,{});
+        QTRY_VERIFY(!link.missionBusy()); link.addPlanWaypoint(39.005,-86.005); link.addPlanWaypoint(39.01,-86.01); link.addPlanRtl();
+        QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
+        int seq[2],prev[2];
+        for (int n=0;n<2;++n) { link.setPlanVehicleId(n+1);
+            seq[n]=link.planItems()[2].toMap().value("commands").toList().last().toMap().value("sequence").toInt();
+            prev[n]=link.planItems()[1].toMap().value("commands").toList().last().toMap().value("sequence").toInt();
+        }
+        for (auto &v:vehicles) readPackets(v); link.uploadPlanMissions();
+        QList<mavlink_mission_item_int_t> missions[2];
+        for (int n=0;n<2;++n) missions[n]=uploadMission(vehicles[n],link,n+1);
+        QTRY_VERIFY(!link.missionBusy()); link.togglePlan(); QVERIFY(link.liveAdjustmentAvailable());
+        QSettings stored(settingsFile(),QSettings::IniFormat); const auto original=stored.value("missionPlans/1-2").toMap();
+        auto changed=original; auto signatures=changed.value("signatures").toMap(); signatures["2"]="different"; changed["signatures"]=signatures;
+        auto expected=changed.value("missions").toMap(); auto items=expected.value("2").toList(); auto bad=items[1].toMap(); bad["z"]=999; items[1]=bad; expected["2"]=items; changed["missions"]=expected;
+        stored.setValue("missionPlans/1-2",changed); stored.sync(); QVERIFY(!link.liveAdjustmentAvailable());
+        stored.setValue("missionPlans/1-2",original); stored.sync(); QVERIFY(link.liveAdjustmentAvailable());
+        bool fresh=true;
+        auto telemetry=[&] {
+            for (int n=0;n<2;++n) {
+                heartbeat(vehicles[n],link,n+1,MAV_AUTOPILOT_ARDUPILOTMEGA,3,true);
+                mavlink_mission_current_t c{}; c.seq=seq[n]; c.total=missions[n].size()-1; c.mission_state=MISSION_STATE_ACTIVE;
+                mavlink_message_t msg{}; mavlink_msg_mission_current_encode(n+1,1,&msg,&c); sendPacket(vehicles[n],link,msg);
+                if (!fresh) continue;
+                const auto a=missions[n][prev[n]],b=missions[n][seq[n]]; const double fraction=n==0 ? 0.8 : 0.2;
+                mavlink_global_position_int_t p{}; p.lat=qRound(a.x+(b.x-a.x)*fraction); p.lon=qRound(a.y+(b.y-a.y)*fraction);
+                p.relative_alt=qRound(b.z*1000); p.alt=200000+p.relative_alt;
+                mavlink_msg_global_position_int_encode(n+1,1,&msg,&p); sendPacket(vehicles[n],link,msg);
+            }
+        };
+        telemetry(); QTest::qWait(50);
+        QTimer timer; connect(&timer,&QTimer::timeout,&link,telemetry); timer.start(250);
+        link.setLiveAdjustmentEnabled(true); QVERIFY(link.liveAdjustmentEnabled());
+        double speeds[2]={0,0};
+        auto collect=[&] { for (int n=0;n<2;++n) for (const auto &c:readCommands(vehicles[n])) if (c.command==MAV_CMD_DO_CHANGE_SPEED) {
+            QCOMPARE(c.param1,1.0f); QCOMPARE(c.param3,-1.0f); speeds[n]=c.param2;
+            acknowledge(vehicles[n],link,n+1,MAV_CMD_DO_CHANGE_SPEED,MAV_RESULT_ACCEPTED);
+        }};
+        QTRY_VERIFY_WITH_TIMEOUT((collect(),speeds[0]>0 && speeds[1]>0),4000);
+        QVERIFY(speeds[0]<speeds[1]); QVERIFY(speeds[1]<=link.defaultPlanSpeed()+0.01);
+        link.setLiveAdjustmentEnabled(false); QVERIFY(!link.liveAdjustmentEnabled());
+        for (int n=0;n<2;++n) { const auto commands=readCommands(vehicles[n]); QVERIFY(!commands.isEmpty()); QVERIFY(commands.last().param2>=speeds[n]); }
+        speeds[0]=speeds[1]=0; link.setLiveAdjustmentEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT((collect(),speeds[0]>0 && speeds[1]>0),4000);
+        acknowledge(vehicles[0],link,1,MAV_CMD_DO_CHANGE_SPEED,MAV_RESULT_DENIED);
+        QTRY_VERIFY(!link.liveAdjustmentEnabled()); QVERIFY(link.liveAdjustmentStatus().contains("rejected"));
+        link.setLiveAdjustmentEnabled(true); fresh=false;
+        QTRY_VERIFY_WITH_TIMEOUT(!link.liveAdjustmentEnabled(),4000);
+        QVERIFY(link.liveAdjustmentStatus().contains("stale"));
+        fresh=true; telemetry(); QTest::qWait(40); link.setLiveAdjustmentEnabled(true); QVERIFY(link.liveAdjustmentEnabled());
+        link.selectVehicle(1); QVERIFY(!link.liveAdjustmentEnabled()); QVERIFY(!link.liveAdjustmentAvailable());
+        timer.stop(); link.selectGroup("Ungrouped"); QVERIFY(link.liveAdjustmentAvailable());
+        mavlink_mission_current_t cleared{}; cleared.mission_state=MISSION_STATE_NO_MISSION;
+        mavlink_message_t clearMessage{}; mavlink_msg_mission_current_encode(2,1,&clearMessage,&cleared); sendPacket(vehicles[1],link,clearMessage);
+        QTRY_VERIFY(!link.liveAdjustmentAvailable());
+    }
     void positionTelemetryRate_data() {
         QTest::addColumn<int>("autopilot");
         QTest::newRow("ArduPilot")<<int(MAV_AUTOPILOT_ARDUPILOTMEGA);
@@ -848,6 +945,12 @@ private slots:
         heartbeat(px4,link,2,MAV_AUTOPILOT_PX4,(4u << 16) | (5u << 24),true);
         QTRY_VERIFY(!link.vehicleDetails(1).value("commandPending").toBool());
         QTRY_VERIFY(!link.vehicleDetails(2).value("commandPending").toBool());
+        for (auto socket : {&copter,&px4}) {
+            mavlink_mission_current_t current{}; current.total=3; current.mission_state=MISSION_STATE_NOT_STARTED;
+            mavlink_message_t msg{}; const int id=socket==&copter ? 1 : 2;
+            mavlink_msg_mission_current_encode(id,1,&msg,&current); sendPacket(*socket,link,msg);
+        }
+        QTest::qWait(40);
         link.groupAction("Ungrouped","mission");
         for (auto socket : {&copter,&px4}) {
             commands = readCommands(*socket);

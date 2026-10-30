@@ -32,6 +32,14 @@ VehicleLink::VehicleLink(QObject *parent, const QString &settingsFile, quint16 p
     for (const auto &group : m_settings->value("vehicleGroups/list").toStringList())
         if (!group.trimmed().isEmpty() && !m_groups.contains(group, Qt::CaseInsensitive)) m_groups.append(group);
     m_clock.start();
+    connect(this,&VehicleLink::selectionChanged,this,[this] {
+        if (m_liveEnabled && m_selection!=m_liveIds) stopLiveAdjustment("Live adjustments: selection changed.");
+        emit liveAdjustmentChanged();
+    });
+    connect(this,&VehicleLink::planChanged,this,[this] {
+        if (m_planActive) stopLiveAdjustment("Live adjustments off in Plan.");
+        emit liveAdjustmentChanged();
+    });
     m_timer.setInterval(1000);
     connect(&m_socket, &QUdpSocket::readyRead, this, &VehicleLink::receive);
     connect(&m_timer, &QTimer::timeout, this, &VehicleLink::tick);
@@ -234,6 +242,8 @@ bool VehicleLink::sendCommand(Peer &peer, quint16 command, float p1, float p2, f
 }
 
 bool VehicleLink::setArmed(int systemId, bool armed) {
+    if (!armed && m_missionStartBatch.contains(systemId)) cancelMissionStarts();
+    if (!armed && m_liveIds.contains(systemId)) stopLiveAdjustment("Live adjustments: disarm requested.");
     const int row = rowForSystem(systemId);
     if (row < 0) { emit notice("Vehicle is disconnected."); return false; }
     auto &peer = m_peers[row];
@@ -251,6 +261,8 @@ bool VehicleLink::setArmed(int systemId, bool armed) {
 }
 
 bool VehicleLink::setFlightMode(int systemId, quint32 mode, int standardMode) {
+    if (m_missionStartBatch.contains(systemId)) cancelMissionStarts();
+    if (m_liveIds.contains(systemId)) stopLiveAdjustment("Live adjustments: mode change requested.");
     const int row = rowForSystem(systemId);
     if (row < 0) { emit notice("Vehicle is disconnected."); return false; }
     auto &peer = m_peers[row];
@@ -279,8 +291,10 @@ bool VehicleLink::setFlightMode(int systemId, quint32 mode, int standardMode) {
 }
 
 void VehicleLink::finishCommand(Peer &peer, const QString &message, bool error) {
+    if (error && m_missionStartBatch.contains(peer.systemId)) cancelMissionStarts();
     const auto command = peer.pendingCommand;
     peer.pendingCommand = 0;
+    peer.queuedMissionStart = false;
     peer.queuedTakeoff = std::numeric_limits<double>::quiet_NaN();
     peer.missionTakeoff = false;
     peer.commandStatus = message;
@@ -301,7 +315,13 @@ void VehicleLink::confirmState(Peer &peer) {
     if (peer.pendingCommand == MAV_CMD_COMPONENT_ARM_DISARM && peer.armed == peer.desiredArmed) {
         const double queued = peer.queuedTakeoff;
         const bool mission = peer.missionTakeoff;
+        const bool start = peer.queuedMissionStart;
         finishCommand(peer,peer.armed ? "Armed." : "Disarmed.");
+        if (start && peer.armed) {
+            if (m_missionStartBatch.contains(peer.systemId)) { peer.queuedMissionStart=true; advanceMissionStarts(); }
+            else startMission(peer.systemId);
+            return;
+        }
         if (std::isfinite(queued)) peer.missionTakeoff = mission;
         if (std::isfinite(queued) && !advanceTakeoff(peer,queued)) failVehicle(peer,"Takeoff cancelled.");
     }
@@ -437,6 +457,8 @@ void VehicleLink::moveToGroup(int systemId, const QString &group) {
 
 void VehicleLink::toggle() {
     if (listening()) {
+        cancelMissionStarts();
+        stopLiveAdjustment("Disconnected.");
         m_timer.stop();
         m_socket.close();
         beginResetModel();
@@ -545,8 +567,19 @@ void VehicleLink::receive() {
                     mavlink_mission_current_t current{};
                     mavlink_msg_mission_current_decode(&message,&current);
                     peer.missionState = current.mission_state;
-                    if (current.mission_state == MISSION_STATE_NO_MISSION) peer.missionCount = 0;
-                    else if (current.total && current.total != UINT16_MAX) peer.missionCount = std::max(0,int(current.total)-(peer.autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA ? 1 : 0));
+                    peer.missionSequence = current.seq;
+                    peer.missionTime = m_clock.elapsed();
+                    if (current.total && current.total!=UINT16_MAX && !m_flightMissions.value(peer.systemId).isEmpty()
+                        && current.total!=m_flightMissions.value(peer.systemId).size()-(peer.autopilot==MAV_AUTOPILOT_ARDUPILOTMEGA ? 1 : 0)) {
+                        m_flightMissions.remove(peer.systemId);
+                        if (m_liveIds.contains(peer.systemId)) stopLiveAdjustment("Live adjustments: onboard mission changed.");
+                        emit planChanged();
+                    }
+                    if (current.mission_state == MISSION_STATE_NO_MISSION) {
+                        peer.missionCount = 0;
+                        if (m_flightMissions.remove(peer.systemId)) emit planChanged();
+                    }
+                    else if (current.total && current.total != UINT16_MAX) peer.missionCount = current.total;
                 } else if (message.msgid == MAVLINK_MSG_ID_STATUSTEXT) {
                     receiveStatusText(peer,message);
                 } else if (message.msgid == MAVLINK_MSG_ID_SYS_STATUS) {
@@ -606,6 +639,7 @@ void VehicleLink::receive() {
                 } else if (message.msgid == MAVLINK_MSG_ID_COMMAND_ACK) {
                     mavlink_command_ack_t ack{};
                     mavlink_msg_command_ack_decode(&message,&ack);
+                    if (receiveLiveSpeedAck(peer,ack)) continue;
                     if (!peer.pendingCommand || ack.command != peer.pendingCommand
                         || (ack.target_system && ack.target_system != 255)
                         || (ack.target_component && ack.target_component != MAV_COMP_ID_MISSIONPLANNER)) continue;
@@ -703,7 +737,7 @@ bool VehicleLink::send(const mavlink_message_t &message, const Peer &peer) {
 }
 
 void VehicleLink::requestTelemetry(const Peer &peer) {
-    for (const auto messageId : {MAVLINK_MSG_ID_GLOBAL_POSITION_INT, MAVLINK_MSG_ID_VFR_HUD}) {
+    for (const auto messageId : {MAVLINK_MSG_ID_GLOBAL_POSITION_INT, MAVLINK_MSG_ID_VFR_HUD, MAVLINK_MSG_ID_MISSION_CURRENT}) {
         mavlink_message_t message{};
         mavlink_status_t status{};
         status.current_tx_seq = m_sequence++;
@@ -747,6 +781,8 @@ void VehicleLink::tick() {
     }
     missionTick();
     updateNavigation();
+    liveAdjustmentTick();
+    advanceMissionStarts();
     updateStatus();
 }
 

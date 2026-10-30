@@ -18,6 +18,7 @@ void VehicleLink::toggleTakeoffUnit() {
 }
 
 bool VehicleLink::takeoff(int systemId) {
+    if (m_missionStartBatch.contains(systemId)) cancelMissionStarts();
     const int row = rowForSystem(systemId);
     if (row < 0) { emit notice("Vehicle is disconnected."); return false; }
     auto &peer = m_peers[row];
