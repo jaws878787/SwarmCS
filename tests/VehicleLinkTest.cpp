@@ -88,6 +88,49 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void verticalBandsThroughCornersAndReturn() {
+        VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[3]; link.toggle();
+        const double homes[]={220,235,210};
+        for (int n=0;n<3;++n) { QVERIFY(vehicles[n].bind(QHostAddress::LocalHost,0)); heartbeat(vehicles[n],link,n+1); }
+        QTRY_COMPARE(link.count(),3);
+        for (int n=0;n<3;++n) {
+            mavlink_global_position_int_t p{}; p.lat=397683968; p.lon=-861580992+n*2368; p.alt=qRound(homes[n]*1000);
+            mavlink_message_t msg{}; mavlink_msg_global_position_int_encode(n+1,1,&msg,&p); sendPacket(vehicles[n],link,msg);
+        }
+        QTRY_VERIFY(link.vehicleDetails(3).value("positionValid").toBool());
+        link.selectGroup("Ungrouped"); link.togglePlan();
+        for (int n=0;n<3;++n) downloadMission(vehicles[n],link,n+1,{});
+        QTRY_VERIFY(!link.missionBusy()); link.setMinimumSeparation(15.24);
+        link.addPlanWaypoint(39.769766,-86.155648); link.addPlanWaypoint(39.771245,-86.157638);
+        link.addPlanWaypoint(39.770907,-86.155753); link.addPlanWaypoint(39.770214,-86.159550);
+        link.addPlanWaypoint(39.768928,-86.160184); link.addPlanWaypoint(39.767320,-86.159272);
+        link.editPlanItem(2,80,5); link.editPlanItem(4,40,5); link.addPlanRtl();
+        QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
+        double low[3],high[3];
+        for (int n=0;n<3;++n) {
+            link.setPlanVehicleId(n+1); low[n]=1e9; high[n]=-1e9;
+            for (int p=1;p<=6;++p) {
+                const double absolute=link.planItems()[p].toMap().value("assignedAltitude").toDouble()+homes[n];
+                low[n]=std::min(low[n],absolute); high[n]=std::max(high[n],absolute);
+            }
+        }
+        for (int n=1;n<3;++n) QVERIFY(low[n]-high[n-1]>=18.2);
+        for (auto &v:vehicles) readPackets(v);
+        link.uploadPlanMissions();
+        for (int n=0;n<3;++n) {
+            const auto mission=uploadMission(vehicles[n],link,n+1);
+            QList<mavlink_mission_item_int_t> motion;
+            for (const auto &i:mission) if (i.command==MAV_CMD_NAV_TAKEOFF || i.command==MAV_CMD_NAV_WAYPOINT) motion.append(i);
+            QVERIFY(motion.size()>=5); QCOMPARE(mission.last().command,quint16(MAV_CMD_NAV_RETURN_TO_LAUNCH));
+            const auto start=motion[1],lift=motion[2],settle=motion.last(),approach=motion[motion.size()-2];
+            QCOMPARE(start.x,lift.x); QCOMPARE(start.y,lift.y); // Lift before any crossing motion.
+            QCOMPARE(settle.x,start.x); QCOMPARE(settle.y,start.y);
+            QCOMPARE(approach.x,start.x); QCOMPARE(approach.y,start.y); // Descend over own home only.
+            QVERIFY(approach.z+homes[n]>=low[n]-0.1);
+            QVERIFY(std::abs(settle.z-15.24)<0.1);
+        }
+        QTRY_VERIFY(!link.missionBusy());
+    }
     void waypointSlotsTradeAtReversals_data() {
         QTest::addColumn<int>("vehicleCount");
         QTest::newRow("two")<<2;
@@ -135,14 +178,11 @@ private slots:
             QVERIFY(std::abs(start)>=18.0); QVERIFY(std::abs(end)>=18.0);
             QVERIFY(start*end>0); QVERIFY(std::abs(start-end)<0.2);
         }
-        QList<double> startLongitudes,endLongitudes;
-        double startMean=0,endMean=0;
+        // RTL now retains cruise bands at the last corner and reforms above each home.
         for (int id=1;id<=vehicleCount;++id) {
-            const double start=coordinate(id,0).longitude(),end=coordinate(id,6).longitude();
-            startLongitudes.append(start); endLongitudes.append(end); startMean+=start/vehicleCount; endMean+=end/vehicleCount;
+            link.setPlanVehicleId(id);
+            QVERIFY(link.planItems().last().toMap().value("commands").toList().size()>1);
         }
-        std::sort(startLongitudes.begin(),startLongitudes.end()); std::sort(endLongitudes.begin(),endLongitudes.end());
-        for (int n=0;n<vehicleCount;++n) QVERIFY(std::abs((startLongitudes[n]-startMean)-(endLongitudes[n]-endMean))<1e-6);
         link.movePlanWaypoint(3,39.771229,-86.159622); QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
         link.movePlanWaypoint(3,39.771064,-86.155516); QVERIFY2(link.planValid(),qPrintable(link.planStatus()));
         link.setMinimumSeparation(1000); QVERIFY(!link.planValid()); // Assignment never bypasses the separation guard.

@@ -177,6 +177,57 @@ bool VehicleLink::recoverGeneratedPlan() {
         if (!takeoff) return false;
     }
     const int count=stages.value(m_planVehicles.first().id).size();
+    // Persistent cruise bands: lift, enter lanes, K corners, home/reform, settle.
+    // Recognize the altitude envelope before the older three-stage-per-leg layouts.
+    bool bands=m_planVehicles.size()>1 && count>=5;
+    double highestHome=-std::numeric_limits<double>::infinity();
+    QList<double> absoluteLayers;
+    for (const auto &v:m_planVehicles) {
+        highestHome=std::max(highestHome,v.homeAltitude);
+        const auto list=stages.value(v.id);
+        if (count<5 || list.size()!=count) { bands=false; continue; }
+        const auto start=starts.value(v.id);
+        auto distance=[](const Stage &a,const Stage &b) { return QGeoCoordinate(a.lat,a.lon).distanceTo(QGeoCoordinate(b.lat,b.lon)); };
+        if (distance(start,list.first())>0.5 || distance(list[count-2],list.last())>0.5
+            || (rtl && distance(start,list.last())>0.5)) bands=false;
+        absoluteLayers.append(list.first().alt+v.homeAltitude);
+    }
+    std::sort(absoluteLayers.begin(),absoluteLayers.end());
+    double pitch=std::numeric_limits<double>::infinity();
+    for (int n=1;n<absoluteLayers.size();++n) pitch=std::min(pitch,absoluteLayers[n]-absoluteLayers[n-1]);
+    if (pitch<0.3 || !std::isfinite(pitch)) bands=false;
+    if (bands) for (int s=1;s<count-1;++s) {
+        QList<double> layers;
+        for (const auto &v:m_planVehicles) layers.append(stages[v.id][s].alt+v.homeAltitude);
+        std::sort(layers.begin(),layers.end());
+        for (int n=1;n<layers.size();++n)
+            if (std::abs((layers[n]-layers[0])-(absoluteLayers[n]-absoluteLayers[0]))>0.2) bands=false;
+    }
+    if (bands) {
+        QList<int> indexes{-1};
+        for (int n=2;n<count-2;++n) indexes.append(n);
+        if (!rtl) indexes.last()=count-1;
+        QList<PlanPoint> points; QMap<int,QList<int>> sequences;
+        double minBase=std::numeric_limits<double>::infinity(),maxBase=-minBase;
+        for (int index:indexes) {
+            double x=0,y=0,z=0,meanAlt=0,lowest=std::numeric_limits<double>::infinity(),speed=0;
+            for (const auto &v:m_planVehicles) {
+                const auto s=index<0 ? starts[v.id] : stages[v.id][index];
+                const double lat=s.lat*pi/180,lon=s.lon*pi/180;
+                x+=std::cos(lat)*std::cos(lon); y+=std::cos(lat)*std::sin(lon); z+=std::sin(lat);
+                meanAlt+=s.alt/m_planVehicles.size(); lowest=std::min(lowest,s.alt+v.homeAltitude);
+                speed=std::max(speed,s.speed); sequences[v.id].append(s.sequence);
+            }
+            const double base=index<0 || (!rtl && index==count-1) ? meanAlt : lowest-highestHome;
+            minBase=std::min(minBase,base); maxBase=std::max(maxBase,base);
+            points.append({std::atan2(z,std::hypot(x,y))*180/pi,std::atan2(y,x)*180/pi,base,speed});
+        }
+        const double separation=pitch-(maxBase-minBase)-3;
+        if (separation>=0.3 && separation<=1000) m_minimumSeparation=separation;
+        for (auto &v:m_planVehicles) { const auto s=starts[v.id]; v.latitude=s.lat; v.longitude=s.lon; }
+        m_planPoints=points; m_pointSequences=sequences; m_planRtl=rtl; m_planValid=true; m_planGeometryVersion=4;
+        return true;
+    }
     const bool oldGeometry=m_planVehicles.size()>1 && count%3==0;
     const bool laneGeometry=m_planVehicles.size()>1 && count>=5 && (count-2)%3==0;
     if (!count || (m_planVehicles.size()>1 && !oldGeometry && !laneGeometry)) return false;

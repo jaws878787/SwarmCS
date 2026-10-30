@@ -22,7 +22,7 @@ Rectangle {
             color: vehicleLink.planValid ? "#71cdbd" : "#ffca82"; Layout.fillWidth: true; font.pixelSize: 12
         }
         Label {
-            text: "Cyan: clicked center route · Orange: vehicle routes\nRelative altitude · nominal timing, no live arrival barrier"
+            text: "Cyan: clicked center route · Orange: vehicle routes\nCrossings use separate altitude bands.\nNominal timing, no live arrival barrier"
             color: "#91a9b9"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 10
         }
         ListView {
@@ -72,7 +72,7 @@ Rectangle {
                             RowLayout {
                                 visible: !rowCard.modelData.isRtl && (rowCard.modelData.editable || rowCard.modelData.hasAltitude)
                                 Layout.fillWidth: true
-                                Label { text: rowCard.modelData.editable ? "Altitude · Relative" : "Altitude · frame " + rowCard.modelData.frame; font.pixelSize: 10; Layout.fillWidth: true }
+                                Label { text: rowCard.modelData.editable ? "Base altitude · Relative" : "Altitude · frame " + rowCard.modelData.frame; font.pixelSize: 10; Layout.fillWidth: true }
                                 TextField {
                                     id: altitude
                                     Layout.preferredWidth: 68; implicitHeight: 30
@@ -95,9 +95,15 @@ Rectangle {
                                 }
                                 ToolButton { text: panel.units.speedMetric ? "kph" : "mph"; onClicked: panel.units.speedMetric=!panel.units.speedMetric }
                             }
+                            Label {
+                                visible: rowCard.modelData.editable
+                                text: "Assigned altitude: " + Number(rowCard.modelData.assignedAltitude*(panel.units.altitudeMetric ? 1 : 1/0.3048)).toFixed(1) + (panel.units.altitudeMetric ? " m" : " ft") + " relative"
+                                color: "#ffbc78"; font.pixelSize: 10
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
                             ToolButton {
                                 id: commandToggle
-                                visible: rowCard.modelData.editable
+                                visible: (rowCard.modelData.commands || []).length > 0
                                 text: (checked ? "▾ " : "▸ ") + "Vehicle commands"
                                 checkable: true; font.pixelSize: 10
                             }
@@ -112,6 +118,7 @@ Rectangle {
                                         text: modelData.sequence + " · " + (modelData.command===178
                                             ? (["Air", "Ground", "Climb", "Descent"][modelData.speedType] || "") + " speed " + (modelData.speed*(panel.units.speedMetric ? 3.6 : 2.2369362921)).toFixed(1) + (panel.units.speedMetric ? " kph" : " mph")
                                             : modelData.command===93 ? "Hold " + modelData.hold.toFixed(1) + " s"
+                                            : modelData.command===20 ? "RTL"
                                             : (modelData.command===22 ? "Takeoff " : "Waypoint ") + (modelData.altitude*(panel.units.altitudeMetric ? 1 : 1/0.3048)).toFixed(1) + (panel.units.altitudeMetric ? " m" : " ft"))
                                     }
                                 }

@@ -90,11 +90,11 @@ QVariantList VehicleLink::planItems() const {
         const auto &p=m_planPoints[n];
         const auto mission=m_plannedMissions.value(m_planVehicleId);
         const auto sequences=m_pointSequences.value(m_planVehicleId);
-        QVariantList commands; double lat=p.latitude,lon=p.longitude;
+        QVariantList commands; double lat=p.latitude,lon=p.longitude,assignedAltitude=p.altitude;
         if (sequences.size()==m_planPoints.size() && sequences[n]<mission.size()) {
-            const auto &destination=mission[sequences[n]]; lat=destination.x/1e7; lon=destination.y/1e7;
+            const auto &destination=mission[sequences[n]]; lat=destination.x/1e7; lon=destination.y/1e7; assignedAltitude=destination.z;
             const int begin=n ? sequences[n-1]+1 : sequences[0];
-            const int end=n==m_planPoints.size()-1 ? int(mission.size())-1-(m_planRtl ? 1 : 0) : sequences[n];
+            const int end=sequences[n];
             for (int seq=begin;seq<=end;++seq) {
                 const auto &i=mission[seq];
                 commands.append(QVariantMap{{"sequence",seq},{"command",int(i.command)},{"altitude",double(i.z)},
@@ -103,9 +103,19 @@ QVariantList VehicleLink::planItems() const {
         }
         result.append(QVariantMap{{"title",n==0 ? QString("Takeoff") : QString("Waypoint %1").arg(n)},
             {"altitude",p.altitude},{"speed",p.speed},{"editable",true},{"frame",int(MAV_FRAME_GLOBAL_RELATIVE_ALT_INT)},
-            {"deletable",n>0},{"isRtl",false},{"latitude",lat},{"longitude",lon},{"commands",commands}});
+            {"deletable",n>0},{"isRtl",false},{"latitude",lat},{"longitude",lon},{"commands",commands},{"assignedAltitude",assignedAltitude}});
     }
-    if (!m_loadedPlan && m_planRtl) result.append(QVariantMap{{"title","RTL"},{"altitude",0.0},{"speed",0.0},{"editable",false},{"deletable",true},{"isRtl",true}});
+    if (!m_loadedPlan && m_planRtl) {
+        QVariantList commands;
+        const auto mission=m_plannedMissions.value(m_planVehicleId);
+        const auto sequences=m_pointSequences.value(m_planVehicleId);
+        if (!sequences.isEmpty()) for (int seq=sequences.last()+1;seq<mission.size();++seq) {
+            const auto &i=mission[seq];
+            commands.append(QVariantMap{{"sequence",seq},{"command",int(i.command)},{"altitude",double(i.z)},
+                {"speed",double(i.param2)},{"speedType",double(i.param1)},{"hold",double(i.param1)}});
+        }
+        result.append(QVariantMap{{"title","RTL"},{"altitude",0.0},{"speed",0.0},{"editable",false},{"deletable",true},{"isRtl",true},{"commands",commands}});
+    }
     return result;
 }
 QVariantList VehicleLink::planCenterPath() const {
@@ -194,7 +204,7 @@ void VehicleLink::removePlanItem(int row) {
 }
 
 void VehicleLink::rebuildPlan() {
-    m_planGeometryVersion=3;
+    m_planGeometryVersion=4;
     m_plannedMissions.clear(); m_pointSequences.clear(); m_planValid=false;
     if (m_planVehicles.isEmpty()) { emit planChanged(); return; }
     // Build route-relative lanes in one local metric frame, including across the date line.
@@ -256,6 +266,12 @@ void VehicleLink::rebuildPlan() {
     std::stable_sort(order.begin(),order.end(),[&](int a,int b) { return dot(offsets[a],laneBasis.first())<dot(offsets[b],laneBasis.first()); });
     QList<double> laneSlots(offsets.size(),0);
     const double laneSpacing=m_minimumSeparation+3; // Reserve room for coordinate quantization and tracking.
+    double highestHome=m_planVehicles.first().homeAltitude,minAltitude=m_planPoints.first().altitude,maxAltitude=minAltitude;
+    for (const auto &v:m_planVehicles) highestHome=std::max(highestHome,v.homeAltitude);
+    for (const auto &p:m_planPoints) { minAltitude=std::min(minAltitude,p.altitude); maxAltitude=std::max(maxAltitude,p.altitude); }
+    // Disjoint absolute-altitude envelopes also protect projected crossings
+    // between different legs, even when requested waypoint heights vary.
+    const double verticalPitch=laneSpacing+maxAltitude-minAltitude;
     for (int rank=0;rank<order.size();++rank) laneSlots[order[rank]]=(rank-(order.size()-1)/2.0)*laneSpacing;
     QList<Vec> arrivalSlots;
     for (double slot:laneSlots) arrivalSlots.append({laneBasis.last().x*slot,laneBasis.last().y*slot,0});
@@ -272,7 +288,7 @@ void VehicleLink::rebuildPlan() {
             const int slot=original && pointIndex>0 && pointIndex==m_planPoints.size()-1 ? landingAssignment[n] : n;
             nodes.append({center.x+(original ? offsets[slot].x : laneBasis[pointIndex].x*laneSlots[n]),
                 center.y+(original ? offsets[slot].y : laneBasis[pointIndex].y*laneSlots[n]),
-                m_planVehicles[n].homeAltitude+point.altitude+(layered ? n*laneSpacing : 0)});
+                layered ? highestHome+point.altitude+n*verticalPitch : m_planVehicles[n].homeAltitude+point.altitude});
         }
         return nodes;
     };
@@ -280,15 +296,31 @@ void VehicleLink::rebuildPlan() {
         stages.append(formation(point,layered,original)); stageSpeeds.append(speed); stagePointEnds.append(logical);
     };
     appendStage(0,false,true,5,0);
+    if (offsets.size()>1 && m_planPoints.size()>1) {
+        appendStage(0,true,true,m_planPoints[1].speed);
+        appendStage(0,true,false,m_planPoints[1].speed);
+    }
     for (int p=1;p<m_planPoints.size();++p) {
         const double speed=m_planPoints[p].speed;
         if (offsets.size()==1) { appendStage(p,false,false,speed,p); continue; }
-        appendStage(p-1,true,p==1,speed);
-        if (p==1) appendStage(0,true,false,speed); // Enter side-by-side lanes above the takeoff slots.
-        appendStage(p,true,false,speed);
         const bool last=p==m_planPoints.size()-1;
-        if (last) appendStage(p,true,true,speed); // Recover the original landing formation after cruise.
-        appendStage(p,false,last,speed,p);
+        appendStage(p,true,false,speed,last && !m_planRtl ? -1 : p);
+        if (last && !m_planRtl) {
+            appendStage(p,true,true,speed);
+            appendStage(p,false,true,speed,p);
+        }
+    }
+    if (m_planRtl && offsets.size()>1 && m_planPoints.size()>1) {
+        QList<Vec> approach,settled;
+        const double base=std::max(m_planPoints.first().altitude,m_planPoints.last().altitude);
+        for (int n=0;n<offsets.size();++n) {
+            // Complete the horizontal return in independent altitude bands.
+            // Only descend once each vehicle is above its own separated home.
+            approach.append({centroid.x+offsets[n].x,centroid.y+offsets[n].y,highestHome+base+n*verticalPitch});
+            settled.append({centroid.x+offsets[n].x,centroid.y+offsets[n].y,m_planVehicles[n].homeAltitude+m_planPoints.first().altitude});
+        }
+        stages.append(approach); stageSpeeds.append(m_planPoints.last().speed); stagePointEnds.append(-1);
+        stages.append(settled); stageSpeeds.append(m_planPoints.last().speed); stagePointEnds.append(-1);
     }
     double totalSeconds=0;
     QList<double> durations{0};
@@ -321,7 +353,11 @@ void VehicleLink::rebuildPlan() {
         for (int s=1;s<stages.size();++s) {
             const auto d=stages[s][n]-stages[s-1][n];
             const double horizontal=std::hypot(d.x,d.y), vertical=std::abs(d.z);
-            if ((horizontal>0.01 && horizontal/durations[s]<0.1) || (vertical>0.01 && vertical/durations[s]<0.1))
+            // A shallow climb may finish before the horizontal leg when capped
+            // to the autopilot's minimum speed. Its entire altitude envelope
+            // remains in the assigned band, so this cannot create a crossing.
+            if ((horizontal>0.01 && horizontal/durations[s]<0.1)
+                || (offsets.size()==1 && vertical>0.01 && vertical/durations[s]<0.1))
                 error="Nominal synchronization requires a speed below 0.1 m/s. Adjust the waypoint or incoming speed.";
             if (horizontal<0.01 && vertical<0.01) {
                 auto wait=item(MAV_CMD_NAV_DELAY); wait.param1=durations[s]; mission.append(wait);
@@ -344,7 +380,7 @@ void VehicleLink::rebuildPlan() {
     }
     m_planValid=error.isEmpty() && (m_planPoints.size()>1 || m_planRtl);
     m_planStatus=!error.isEmpty() ? error : m_planPoints.size()==1 && !m_planRtl ? "Click the map to add a waypoint."
-        : QString("Separation checked · %1 slot reassignments · nominal route %2 s").arg(reassignments).arg(std::ceil(totalSeconds));
+        : QString("Separation checked · vertical crossing bands · %1 slot reassignments · %2 s").arg(reassignments).arg(std::ceil(totalSeconds));
     emit planChanged();
 }
 
@@ -465,9 +501,9 @@ void VehicleLink::finishMissionDownloads() {
         if (any) {
             if (restorePlanMetadata() || recoverGeneratedPlan()) {
                 m_loadedPlan=false;
-                if (m_planGeometryVersion<3) {
+                if (m_planGeometryVersion<4) {
                     rebuildPlan();
-                    if (m_planValid) m_planStatus="Recalculated horizontal lanes. Upload to apply to vehicles.";
+                    if (m_planValid) m_planStatus="Recalculated crossing altitude bands. Upload to apply.";
                 } else m_planStatus="Restored center route and downloaded vehicle missions.";
             } else { m_planValid=false; m_planStatus="Imported missions · select a vehicle to view its items."; }
 
