@@ -28,6 +28,33 @@ Map {
         pendingGroupFit = ""
     }
     onMapReadyChanged: { if (mapReady && pendingGroupFit.length > 0) frameGroup(pendingGroupFit) }
+    function followSelection() {
+        const members=[]
+        let x=0, y=0, z=0
+        for (let i=0;i<mapItems.length;++i) {
+            const item=mapItems[i]
+            if (!item.positionValid || vehicleLink.selectedIds.indexOf(item.systemId)<0) continue
+            members.push(item)
+            const lat=item.latitude*Math.PI/180, lon=item.longitude*Math.PI/180
+            x+=Math.cos(lat)*Math.cos(lon); y+=Math.cos(lat)*Math.sin(lon); z+=Math.sin(lat)
+        }
+        if (members.length===0) return
+        // Spherical center handles selections straddling the date line.
+        viewState.mapCenter=QtPositioning.coordinate(Math.atan2(z,Math.hypot(x,y))*180/Math.PI,Math.atan2(y,x)*180/Math.PI)
+        if (members.length>1) {
+            // Keep the chosen zoom unless the formation grows beyond the view.
+            const outside=members.some(item => {
+                const p=map.fromCoordinate(item.coordinate,false)
+                return p.x<width*0.12 || p.x>width*0.88 || p.y<height*0.12 || p.y>height*0.88
+            })
+            if (outside && viewState.zoomStep<20) viewState.selectZoom(viewState.zoomStep+1)
+        }
+    }
+    Timer {
+        interval: 100; repeat: true
+        running: map.mapReady && !vehicleLink.planActive && vehicleLink.selectedIds.length>0
+        onTriggered: map.followSelection()
+    }
     MapItemView {
         model: vehicleLink.planActive ? vehicleLink.planPaths : vehicleLink.flightPaths
         delegate: MapPolyline {

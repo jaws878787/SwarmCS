@@ -709,7 +709,7 @@ void VehicleLink::requestTelemetry(const Peer &peer) {
         status.current_tx_seq = m_sequence++;
         mavlink_msg_command_long_pack_status(255, MAV_COMP_ID_MISSIONPLANNER, &status, &message,
             peer.systemId, peer.componentId, MAV_CMD_SET_MESSAGE_INTERVAL, 0,
-            messageId, 500000, 0, 0, 0, 0, 0);
+            messageId, messageId==MAVLINK_MSG_ID_GLOBAL_POSITION_INT ? 100000 : 500000, 0, 0, 0, 0, 0);
         send(message, peer);
     }
 }

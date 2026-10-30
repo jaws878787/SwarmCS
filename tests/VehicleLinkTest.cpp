@@ -88,6 +88,24 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void positionTelemetryRate_data() {
+        QTest::addColumn<int>("autopilot");
+        QTest::newRow("ArduPilot")<<int(MAV_AUTOPILOT_ARDUPILOTMEGA);
+        QTest::newRow("PX4")<<int(MAV_AUTOPILOT_PX4);
+    }
+    void positionTelemetryRate() {
+        QFETCH(int,autopilot);
+        VehicleLink link(nullptr,settingsFile()+QString::number(autopilot),0); QUdpSocket vehicle;
+        QVERIFY(vehicle.bind(QHostAddress::LocalHost,0)); link.toggle(); heartbeat(vehicle,link,1,quint8(autopilot));
+        QTRY_COMPARE(link.count(),1);
+        QMap<int,double> intervals;
+        for (const auto &c:readCommands(vehicle)) if (c.command==MAV_CMD_SET_MESSAGE_INTERVAL) {
+            QCOMPARE(c.target_system,quint8(1)); QCOMPARE(c.target_component,quint8(MAV_COMP_ID_AUTOPILOT1));
+            intervals[qRound(c.param1)]=c.param2;
+        }
+        QCOMPARE(intervals.value(MAVLINK_MSG_ID_GLOBAL_POSITION_INT),100000.0);
+        QCOMPARE(intervals.value(MAVLINK_MSG_ID_VFR_HUD),500000.0);
+    }
     void defaultWaypointSpeed() {
         VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicle;
         QCOMPARE(link.defaultPlanSpeed(),8.9408);
