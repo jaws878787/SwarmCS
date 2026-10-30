@@ -22,6 +22,8 @@ VehicleLink::VehicleLink(QObject *parent, const QString &settingsFile, quint16 p
       m_settings(settingsFile.isEmpty() ? std::make_unique<QSettings>()
           : std::make_unique<QSettings>(settingsFile, QSettings::IniFormat)), m_port(port) {
     m_resolvedNames = resolvedNames();
+    const double savedPlanSpeed=m_settings->value("planning/defaultSpeedMetersPerSecond",8.9408).toDouble();
+    if (std::isfinite(savedPlanSpeed) && savedPlanSpeed>=0.1 && savedPlanSpeed<=30) m_defaultPlanSpeed=savedPlanSpeed;
     const double savedAltitude = m_settings->value("takeoff/altitudeMeters",15.24).toDouble();
     if (std::isfinite(savedAltitude) && savedAltitude > 0 && savedAltitude <= 10000) m_takeoffMeters = savedAltitude;
     m_takeoffUnit = m_settings->value("takeoff/unit","ft").toString() == "m" ? "m" : "ft";

@@ -41,6 +41,7 @@ class VehicleLink final : public QAbstractListModel {
     Q_PROPERTY(QString planStatus READ planStatus NOTIFY planChanged)
     Q_PROPERTY(bool planValid READ planValid NOTIFY planChanged)
     Q_PROPERTY(double minimumSeparation READ minimumSeparation WRITE setMinimumSeparation NOTIFY planChanged)
+    Q_PROPERTY(double defaultPlanSpeed READ defaultPlanSpeed NOTIFY planChanged)
 public:
     enum Role { SystemIdRole = Qt::UserRole + 1, VehicleNameRole, FirmwareRole,
                 ArmedRole, FlightModeRole, AltitudeRole, VelocityRole, VehicleGroupRole,
@@ -103,6 +104,7 @@ public:
     bool planValid() const { return m_planValid; }
     QString planStatus() const { return m_planStatus; }
     double minimumSeparation() const { return m_minimumSeparation; }
+    double defaultPlanSpeed() const { return m_defaultPlanSpeed; }
     QVariantList planVehicles() const;
     QVariantList planItems() const;
     QVariantList planPaths() const;
@@ -122,6 +124,7 @@ public:
     Q_INVOKABLE void clearPlanMissions();
     Q_INVOKABLE void uploadPlanMissions();
     Q_INVOKABLE void setMinimumSeparation(double meters);
+    Q_INVOKABLE void setDefaultPlanSpeed(double metersPerSecond, bool updateExisting = false);
 signals:
     void changed();
     void groupsChanged();
@@ -288,6 +291,7 @@ private:
     bool m_planValid = false;
     bool m_loadedPlan = false;
     double m_minimumSeparation = 5;
+    double m_defaultPlanSpeed = 8.9408; // 20 mph, stored internally in m/s.
     QString m_planStatus;
     QList<PlanVehicle> m_planVehicles;
     QList<PlanPoint> m_planPoints;

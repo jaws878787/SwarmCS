@@ -159,6 +159,40 @@ ApplicationWindow {
                     }
                 }
                 ToolButton { text: planUnits.distanceMetric ? "m" : "ft"; onClicked: { planUnits.distanceMetric = !planUnits.distanceMetric; separationField.text=(vehicleLink.minimumSeparation*(planUnits.distanceMetric ? 1 : 1/0.3048)).toFixed(1) } }
+                Label { text: "Default speed"; font.pixelSize: 11 }
+                TextField {
+                    id: defaultSpeedField
+                    property bool edited: false
+                    Layout.preferredWidth: 65; implicitHeight: 34
+                    enabled: !vehicleLink.missionBusy
+                    selectByMouse: true; horizontalAlignment: Text.AlignHCenter
+                    Accessible.name: "Default waypoint speed"
+                    text: (vehicleLink.defaultPlanSpeed*(planUnits.speedMetric ? 3.6 : 2.2369362921)).toFixed(1)
+                    validator: DoubleValidator { bottom: planUnits.speedMetric ? 0.36 : 0.224; top: planUnits.speedMetric ? 108 : 67.1; locale: "en_US" }
+                    function refreshValue() { text=(vehicleLink.defaultPlanSpeed*(planUnits.speedMetric ? 3.6 : 2.2369362921)).toFixed(1) }
+                    function commitValue() {
+                        if (edited && acceptableInput) {
+                            const speed=Number(text)/(planUnits.speedMetric ? 3.6 : 2.2369362921)
+                            if (Math.abs(speed-vehicleLink.defaultPlanSpeed)>0.00001) {
+                                vehicleLink.setDefaultPlanSpeed(speed)
+                                if (vehicleLink.planItems.some((item,index) => index>0 && item.editable)) {
+                                    applyDefaultSpeed.requestedSpeed=speed
+                                    applyDefaultSpeed.open()
+                                }
+                            }
+                        }
+                        edited=false; refreshValue()
+                    }
+                    onTextEdited: edited=true
+                    onEditingFinished: commitValue()
+                    Connections { target: planUnits; function onSpeedMetricChanged() { defaultSpeedField.refreshValue() } }
+                }
+                ToolButton {
+                    text: planUnits.speedMetric ? "kph" : "mph"
+                    enabled: !vehicleLink.missionBusy
+                    Accessible.name: "Default speed units; click to switch mph / kph"
+                    onClicked: { defaultSpeedField.commitValue(); planUnits.speedMetric=!planUnits.speedMetric; defaultSpeedField.refreshValue() }
+                }
                 Button { text: "Clear"; enabled: !vehicleLink.missionBusy; onClicked: vehicleLink.clearPlanMissions() }
                 Button { text: "Upload"; enabled: vehicleLink.planValid && !vehicleLink.missionBusy; onClicked: vehicleLink.uploadPlanMissions() }
             }
@@ -294,6 +328,19 @@ ApplicationWindow {
                 }
             }
         }
+    }
+    Dialog {
+        id: applyDefaultSpeed
+        property real requestedSpeed: 0
+        parent: Overlay.overlay; anchors.centerIn: parent
+        width: Math.min(420, window.width-32); modal: true
+        title: "Update existing waypoints?"
+        standardButtons: Dialog.Yes | Dialog.No
+        Label {
+            width: parent.width; wrapMode: Text.WordWrap
+            text: "Set all existing waypoint speeds to " + (applyDefaultSpeed.requestedSpeed*(planUnits.speedMetric ? 3.6 : 2.2369362921)).toFixed(1) + (planUnits.speedMetric ? " kph" : " mph") + "? Choose No to use this default only for new waypoints."
+        }
+        onAccepted: vehicleLink.setDefaultPlanSpeed(requestedSpeed,true)
     }
     Dialog {
         id: connectionSettings

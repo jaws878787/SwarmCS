@@ -175,12 +175,21 @@ void VehicleLink::setMinimumSeparation(double meters) {
     m_minimumSeparation=meters;
     if (!m_loadedPlan) rebuildPlan(); else { m_planValid=false; m_planStatus="Loaded missions are shown unchanged. Clear to design a checked swarm route."; emit planChanged(); }
 }
+void VehicleLink::setDefaultPlanSpeed(double speed,bool updateExisting) {
+    if (!std::isfinite(speed) || speed<0.1 || speed>30 || missionBusy()) return;
+    m_defaultPlanSpeed=speed;
+    m_settings->setValue("planning/defaultSpeedMetersPerSecond",speed);
+    if (updateExisting && m_planActive && !m_loadedPlan && m_planPoints.size()>1) {
+        for (int n=1;n<m_planPoints.size();++n) m_planPoints[n].speed=speed;
+        rebuildPlan();
+    } else emit planChanged();
+}
 void VehicleLink::addPlanWaypoint(double latitude,double longitude) {
     if (!m_planActive || missionBusy()) return;
     if (m_loadedPlan) { emit notice("Clear loaded missions before creating a new swarm route."); return; }
     if (!QGeoCoordinate(latitude,longitude).isValid() || m_planPoints.size()>=100) return;
     const auto previous=m_planPoints.isEmpty() ? PlanPoint{} : m_planPoints.last();
-    m_planPoints.append({latitude,longitude,previous.altitude,previous.speed});
+    m_planPoints.append({latitude,longitude,previous.altitude,m_defaultPlanSpeed});
     m_selectedPlanItem=m_planPoints.size()-1; rebuildPlan(); emit planSelectionChanged();
 }
 void VehicleLink::editPlanItem(int row,double altitudeFeet,double speed) {

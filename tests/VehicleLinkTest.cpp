@@ -88,6 +88,31 @@ class VehicleLinkTest : public QObject {
     QTemporaryDir m_storage;
     QString settingsFile() const { return m_storage.filePath(QString(QTest::currentTestFunction()) + ".ini"); }
 private slots:
+    void defaultWaypointSpeed() {
+        VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicle;
+        QCOMPARE(link.defaultPlanSpeed(),8.9408);
+        QVERIFY(vehicle.bind(QHostAddress::LocalHost,0)); link.toggle(); heartbeat(vehicle,link,1);
+        QTRY_COMPARE(link.count(),1);
+        mavlink_global_position_int_t p{}; p.lat=390000000; p.lon=-860000000; p.alt=200000;
+        mavlink_message_t msg{}; mavlink_msg_global_position_int_encode(1,1,&msg,&p); sendPacket(vehicle,link,msg);
+        QTRY_VERIFY(link.vehicleDetails(1).value("positionValid").toBool());
+        link.selectVehicle(1); link.togglePlan(); downloadMission(vehicle,link,1,{});
+        QTRY_VERIFY(!link.missionBusy()); link.addPlanWaypoint(39.001,-86.001);
+        QCOMPARE(link.planItems()[1].toMap().value("speed").toDouble(),8.9408);
+        link.editPlanItem(1,50,4); link.setDefaultPlanSpeed(12);
+        QCOMPARE(link.planItems()[1].toMap().value("speed").toDouble(),4.0); // Declining keeps edits.
+        link.addPlanWaypoint(39.002,-86.002);
+        QCOMPARE(link.planItems()[2].toMap().value("speed").toDouble(),12.0);
+        link.addPlanRtl(); link.setDefaultPlanSpeed(10,true);
+        QCOMPARE(link.planItems()[1].toMap().value("speed").toDouble(),10.0);
+        QCOMPARE(link.planItems()[2].toMap().value("speed").toDouble(),10.0);
+        QVERIFY(link.planItems().last().toMap().value("isRtl").toBool());
+        QCOMPARE(link.planItems()[0].toMap().value("altitude").toDouble(),15.24);
+        link.setDefaultPlanSpeed(0,true); link.setDefaultPlanSpeed(std::numeric_limits<double>::quiet_NaN());
+        QCOMPARE(link.defaultPlanSpeed(),10.0);
+        QSettings stored(settingsFile(),QSettings::IniFormat); stored.sync();
+        VehicleLink restored(nullptr,settingsFile(),0); QCOMPARE(restored.defaultPlanSpeed(),10.0);
+    }
     void verticalBandsThroughCornersAndReturn() {
         VehicleLink link(nullptr,settingsFile(),0); QUdpSocket vehicles[3]; link.toggle();
         const double homes[]={220,235,210};
